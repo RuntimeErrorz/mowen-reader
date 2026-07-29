@@ -1,0 +1,165 @@
+import * as FileSystem from 'expo-file-system/legacy';
+import JSZip from 'jszip';
+import { XMLParser } from 'fast-xml-parser';
+import { decode } from 'html-entities';
+import { Book, Chapter } from './types';
+
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+const asArray = <T,>(value: T | T[] | undefined): T[] => value == null ? [] : Array.isArray(value) ? value : [value];
+const attr = (node: any, name: string) => node?.[`@_${name}`] ?? '';
+
+function dirname(path: string) {
+  const index = path.lastIndexOf('/');
+  return index < 0 ? '' : path.slice(0, index + 1);
+}
+
+function resolvePath(base: string, target: string) {
+  const clean = decodeURIComponent(target.split('#')[0]);
+  const pieces = `${base}${clean}`.split('/');
+  const out: string[] = [];
+  for (const piece of pieces) {
+    if (!piece || piece === '.') continue;
+    if (piece === '..') out.pop(); else out.push(piece);
+  }
+  return out.join('/');
+}
+
+function textValue(value: any): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (value && typeof value === 'object') return String(value['#text'] ?? '');
+  return '';
+}
+
+function stripHtml(html: string) {
+  const notes: Record<string, string> = {};
+  const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
+  for (const list of html.match(noteListRegex) ?? []) {
+    const itemRegex = /<li\b([^>]*)>([\s\S]*?)<\/li>/gi;
+    let item: RegExpExecArray | null;
+    while ((item = itemRegex.exec(list))) {
+      const id = item[1].match(/\bid=["']([^"']+)["']/i)?.[1];
+      const className = item[1].match(/\bclass=["']([^"']+)["']/i)?.[1] ?? '';
+      if (!id || !className.includes('footnote-item')) continue;
+      notes[id] = decode(item[2].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    }
+  }
+  const heading = html.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1];
+  const title = heading ? decode(heading.replace(/<[^>]+>/g, '').trim()) : '';
+  let body = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(noteListRegex, '')
+    .replace(/<a\b([^>]*)class=["'][^"']*footnote[^"']*["']([^>]*)>[\s\S]*?<\/a>/gi, (tag) => {
+      const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? '';
+      const id = href.includes('#') ? href.split('#').pop() : '';
+      return id ? `[[MOWEN_NOTE_REF:${id}]]` : '';
+    })
+    .replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (_tag, src) => `\n[[MOWEN_IMAGE:${src}]]\n`)
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  body = decode(body).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n');
+  const raw = body.split(/\n+/).map((part) => part.trim()).filter((part) => part.length > 1);
+  const paragraphs = raw.flatMap((part) => {
+    if (part.length < 700) return [part];
+    return part.match(/.{1,420}(?:[。！？.!?；;]|$)/g)?.map((x) => x.trim()).filter(Boolean) ?? [part];
+  });
+  return { title, paragraphs, notes };
+}
+
+function imageMime(path: string, declared?: string) {
+  if (declared?.startsWith('image/')) return declared;
+  const extension = path.split('.').pop()?.toLowerCase();
+  if (extension === 'png') return 'image/png';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'svg') return 'image/svg+xml';
+  return 'image/jpeg';
+}
+
+function navLabels(html: string, base: string) {
+  const labels = new Map<string, string>();
+  const regex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(html))) {
+    labels.set(resolvePath(base, match[1]), decode(match[2].replace(/<[^>]+>/g, '').trim()));
+  }
+  return labels;
+}
+
+export async function parseEpub(uri: string, fallbackName: string): Promise<Book> {
+  const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+  const zip = await JSZip.loadAsync(base64, { base64: true });
+  const containerText = await zip.file('META-INF/container.xml')?.async('text');
+  if (!containerText) throw new Error('这不是有效的 EPUB：缺少 container.xml');
+  const container = parser.parse(containerText);
+  const rootfile = asArray(container?.container?.rootfiles?.rootfile)[0];
+  const opfPath = attr(rootfile, 'full-path');
+  const opfText = await zip.file(opfPath)?.async('text');
+  if (!opfText) throw new Error('无法读取 EPUB 内容清单');
+
+  const pkg = parser.parse(opfText)?.package;
+  const metadata = pkg?.metadata ?? {};
+  const title = textValue(metadata['dc:title']) || fallbackName.replace(/\.epub$/i, '') || '未命名书籍';
+  const author = textValue(asArray(metadata['dc:creator'])[0]) || '未知作者';
+  const description = decode(textValue(metadata['dc:description']).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  const opfBase = dirname(opfPath);
+  const manifestItems = asArray<any>(pkg?.manifest?.item);
+  const byId = new Map(manifestItems.map((item) => [attr(item, 'id'), item]));
+  const byPath = new Map(manifestItems.map((item) => [resolvePath(opfBase, attr(item, 'href')), item]));
+  const spineItems = asArray<any>(pkg?.spine?.itemref);
+
+  const navItem = manifestItems.find((item) => String(attr(item, 'properties')).includes('nav'));
+  let labels = new Map<string, string>();
+  if (navItem) {
+    const navPath = resolvePath(opfBase, attr(navItem, 'href'));
+    const navText = await zip.file(navPath)?.async('text');
+    if (navText) labels = navLabels(navText, dirname(navPath));
+  }
+
+  const chapters: Chapter[] = [];
+  for (let index = 0; index < spineItems.length; index++) {
+    const item = byId.get(attr(spineItems[index], 'idref'));
+    if (!item) continue;
+    const path = resolvePath(opfBase, attr(item, 'href'));
+    const html = await zip.file(path)?.async('text');
+    if (!html) continue;
+    const parsed = stripHtml(html);
+    if (!parsed.paragraphs.length) continue;
+    const paragraphs: string[] = [];
+    for (const paragraph of parsed.paragraphs) {
+      const imageMatch = paragraph.match(/^\[\[MOWEN_IMAGE:(.+)\]\]$/);
+      if (!imageMatch) {
+        paragraphs.push(paragraph);
+        continue;
+      }
+      const imagePath = resolvePath(dirname(path), imageMatch[1]);
+      const imageFile = zip.file(imagePath);
+      if (!imageFile) continue;
+      const data = await imageFile.async('base64');
+      // Keep pathological assets from making the persisted book unusably large.
+      if (data.length > 11_000_000) continue;
+      const manifestItem = byPath.get(imagePath);
+      const mime = imageMime(imagePath, attr(manifestItem, 'media-type'));
+      if (mime === 'image/svg+xml') continue;
+      paragraphs.push(`[[MOWEN_IMAGE_DATA:data:${mime};base64,${data}]]`);
+    }
+    chapters.push({
+      id: `${index}-${attr(item, 'id')}`,
+      title: labels.get(path) || parsed.title || `第 ${chapters.length + 1} 章`,
+      paragraphs,
+      notes: parsed.notes,
+    });
+  }
+  if (!chapters.length) throw new Error('没有在这本 EPUB 中找到可阅读的正文');
+
+  let cover: string | undefined;
+  const coverMeta = asArray<any>(metadata.meta).find((item) => attr(item, 'name') === 'cover');
+  const coverItem = (coverMeta && byId.get(attr(coverMeta, 'content'))) || manifestItems.find((item) => String(attr(item, 'properties')).includes('cover-image'));
+  if (coverItem) {
+    const coverPath = resolvePath(opfBase, attr(coverItem, 'href'));
+    const coverData = await zip.file(coverPath)?.async('base64');
+    if (coverData && coverData.length < 2_500_000) cover = `data:${attr(coverItem, 'media-type') || 'image/jpeg'};base64,${coverData}`;
+  }
+
+  return { id: `book-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title, author, description: description || undefined, cover, chapters, addedAt: Date.now() };
+}

@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "ai-epub",
-    "slug": "ai-epub",
+    "name": "墨问",
+    "slug": "mowen-reader",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
@@ -16,15 +16,20 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.mowen.reader",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
+      "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store"
+    ]
   }
 }
