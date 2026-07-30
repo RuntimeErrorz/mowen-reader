@@ -144,7 +144,13 @@ const FOLIATE_BRIDGE = String.raw`
   const applyConfig = config => {
     state.config = config;
     const shell = document.getElementById('reader-shell');
-    shell.style.inset = config.prefs.pagePaddingTop + 'px ' + config.prefs.pagePaddingRight + 'px ' + config.prefs.pagePaddingBottom + 'px ' + config.prefs.pagePaddingLeft + 'px';
+    const paged = config.prefs.readingMode === 'paged';
+    // A paginated view must own the horizontal margins. Keeping them on this
+    // shell turns the page into a smaller moving viewport, leaving its margins
+    // behind while Foliate follows a finger.
+    shell.style.inset = paged
+      ? config.prefs.pagePaddingTop + 'px 0 ' + config.prefs.pagePaddingBottom + 'px 0'
+      : config.prefs.pagePaddingTop + 'px ' + config.prefs.pagePaddingRight + 'px ' + config.prefs.pagePaddingBottom + 'px ' + config.prefs.pagePaddingLeft + 'px';
     document.documentElement.style.setProperty('--bg', config.palette.bg);
     document.documentElement.style.setProperty('--text', config.palette.text);
     document.documentElement.style.setProperty('--muted', config.palette.muted);
@@ -160,7 +166,13 @@ const FOLIATE_BRIDGE = String.raw`
     renderer.removeAttribute('animated');
     renderer.setAttribute('flow', config.prefs.readingMode === 'scroll' ? 'scrolled' : 'paginated');
     renderer.setAttribute('margin', '0px');
-    renderer.setAttribute('gap', '0%');
+    const horizontalInset = config.prefs.pagePaddingLeft + config.prefs.pagePaddingRight;
+    const desiredGap = horizontalInset / Math.max(1, globalThis.innerWidth || 1);
+    // Foliate expands the declared percentage into both page-edge padding and
+    // the inter-column gap. Invert that expansion so the user-set margins stay
+    // visually accurate on every screen width.
+    const gap = Math.min(40, desiredGap / (1 + desiredGap) * 100);
+    renderer.setAttribute('gap', paged ? gap + '%' : '0%');
     renderer.setAttribute('max-column-count', '1');
     renderer.setStyles?.(styleText(config));
   };
@@ -251,7 +263,8 @@ const FOLIATE_BRIDGE = String.raw`
     doc.addEventListener('touchmove', event => {
       if (!touch || event.touches.length !== 1) return;
       const point = event.touches[0];
-      if (Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > 9) {
+      const moveThreshold = state.config?.prefs.readingMode === 'paged' ? 4 : 9;
+      if (Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > moveThreshold) {
         touch.moved = true;
         clearLongPress();
       } else event.stopImmediatePropagation();
