@@ -5,12 +5,31 @@ export type Chapter = {
   notes?: Record<string, string>;
 };
 
+export type EpubLocator = {
+  href: string;
+  type: string;
+  target?: number;
+  title?: string;
+  locations?: {
+    progression: number;
+    position?: number;
+    totalProgression?: number;
+  };
+  text?: {
+    before?: string;
+    highlight?: string;
+    after?: string;
+  };
+};
+
 export type Book = {
   id: string;
   title: string;
   author: string;
   description?: string;
   cover?: string;
+  /** Persisted original EPUB used by the Foliate renderer. */
+  epubUri?: string;
   chapters: Chapter[];
   addedAt: number;
 };
@@ -21,15 +40,23 @@ export type BookSummary = Omit<Book, 'chapters'> & {
   currentParagraph: number;
   progress: number;
   lastReadAt: number;
+  locator?: EpubLocator;
 };
 
 export type ReaderPrefs = {
+  readingMode: 'scroll' | 'paged';
   fontSize: number;
   lineHeight: number;
   theme: 'paper' | 'wheat' | 'night' | 'mist';
   fontStyle: 'serif' | 'sans';
+  /** Kept for migrating preferences saved by older versions. */
   pagePadding: number;
+  pagePaddingTop: number;
+  pagePaddingBottom: number;
+  pagePaddingLeft: number;
+  pagePaddingRight: number;
   paragraphSpacing: number;
+  firstLineIndent: boolean;
   textAlign: 'left' | 'justify';
 };
 
@@ -51,6 +78,7 @@ export type Bookmark = {
   paragraphIndex: number;
   chapterTitle: string;
   excerpt: string;
+  locator?: EpubLocator;
   createdAt: number;
 };
 
@@ -61,6 +89,7 @@ export type AIConversation = {
   paragraphIndex: number;
   chapterTitle: string;
   anchorExcerpt: string;
+  locator?: EpubLocator;
   contextRadius: number;
   messages: AIMessage[];
   createdAt: number;

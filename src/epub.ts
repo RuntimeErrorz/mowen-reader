@@ -30,7 +30,7 @@ function textValue(value: any): string {
   return '';
 }
 
-function stripHtml(html: string) {
+function extractFootnotes(html: string) {
   const notes: Record<string, string> = {};
   const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
   for (const list of html.match(noteListRegex) ?? []) {
@@ -43,16 +43,40 @@ function stripHtml(html: string) {
       notes[id] = decode(item[2].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     }
   }
+  const standaloneRegex = /<(?:p|li|aside)\b([^>]*(?:class=["'][^"']*(?:fncontent|footnote)[^"']*["']|epub:type=["'](?:footnote|endnote)["'])[^>]*)>([\s\S]*?)<\/(?:p|li|aside)>/gi;
+  let standalone: RegExpExecArray | null;
+  while ((standalone = standaloneRegex.exec(html))) {
+    const ownId = standalone[1].match(/\bid=["']([^"']+)["']/i)?.[1];
+    const anchorId = standalone[2].match(/<a\b[^>]*\bid=["']([^"']+)["'][^>]*>/i)?.[1];
+    const id = ownId || anchorId;
+    if (!id) continue;
+    const withoutBacklink = standalone[2].replace(/<a\b[^>]*>[\s\S]*?<\/a>/i, '');
+    notes[id] = decode(withoutBacklink.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+  return notes;
+}
+
+function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
+  const localNotes = extractFootnotes(html);
+  const availableNotes = { ...globalNotes, ...localNotes };
+  const notes: Record<string, string> = {};
+  const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
+  const standaloneNoteRegex = /<(?:p|li|aside)\b[^>]*(?:class=["'][^"']*(?:fncontent|footnote)[^"']*["']|epub:type=["'](?:footnote|endnote)["'])[^>]*>[\s\S]*?<\/(?:p|li|aside)>/gi;
   const heading = html.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1];
   const title = heading ? decode(heading.replace(/<[^>]+>/g, '').trim()) : '';
   let body = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(noteListRegex, '')
-    .replace(/<a\b([^>]*)class=["'][^"']*footnote[^"']*["']([^>]*)>[\s\S]*?<\/a>/gi, (tag) => {
-      const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? '';
-      const id = href.includes('#') ? href.split('#').pop() : '';
-      return id ? `[[MOWEN_NOTE_REF:${id}]]` : '';
+    .replace(standaloneNoteRegex, '')
+    .replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_tag, attributes, inner) => {
+      const href = attributes.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? '';
+      const id = href.includes('#') ? href.split('#').pop() ?? '' : '';
+      if (id && availableNotes[id]) {
+        notes[id] = availableNotes[id];
+        return `[[MOWEN_NOTE_REF:${id}]]`;
+      }
+      return inner;
     })
     .replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (_tag, src) => `\n[[MOWEN_IMAGE:${src}]]\n`)
     .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/blockquote)>/gi, '\n')
@@ -116,14 +140,21 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
     if (navText) labels = navLabels(navText, dirname(navPath));
   }
 
-  const chapters: Chapter[] = [];
+  const documents: Array<{ index: number; item: any; path: string; html: string }> = [];
   for (let index = 0; index < spineItems.length; index++) {
     const item = byId.get(attr(spineItems[index], 'idref'));
     if (!item) continue;
     const path = resolvePath(opfBase, attr(item, 'href'));
     const html = await zip.file(path)?.async('text');
     if (!html) continue;
-    const parsed = stripHtml(html);
+    documents.push({ index, item, path, html });
+  }
+  const globalNotes: Record<string, string> = {};
+  documents.forEach(({ html }) => Object.assign(globalNotes, extractFootnotes(html)));
+
+  const chapters: Chapter[] = [];
+  for (const { index, item, path, html } of documents) {
+    const parsed = stripHtml(html, globalNotes);
     if (!parsed.paragraphs.length) continue;
     const paragraphs: string[] = [];
     for (const paragraph of parsed.paragraphs) {
@@ -161,5 +192,5 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
     if (coverData && coverData.length < 2_500_000) cover = `data:${attr(coverItem, 'media-type') || 'image/jpeg'};base64,${coverData}`;
   }
 
-  return { id: `book-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title, author, description: description || undefined, cover, chapters, addedAt: Date.now() };
+  return { id: `book-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title, author, description: description || undefined, cover, epubUri: uri, chapters, addedAt: Date.now() };
 }

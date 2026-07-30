@@ -1,4 +1,5 @@
 import { AIMessage, AISettings, Chapter } from './types';
+import * as FileSystem from 'expo-file-system/legacy';
 
 export type AIIntent = 'explain' | 'thread' | 'simple' | 'question';
 
@@ -9,6 +10,27 @@ const intentText: Record<AIIntent, string> = {
   question: '回答读者的问题；如果原文不足以支持结论，要明确说明。',
 };
 
+function imageMime(uri: string) {
+  const extension = uri.split(/[?#]/)[0].split('.').pop()?.toLowerCase();
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'webp') return 'image/webp';
+  return 'image/png';
+}
+
+async function resolveImageBlock(text: string) {
+  const inline = text.match(/^\[\[MOWEN_IMAGE_DATA:(data:image\/[\s\S]+)\]\]$/)?.[1];
+  if (inline) return inline;
+  const uri = text.match(/^\[\[MOWEN_IMAGE_FILE:([\s\S]+)\]\]$/)?.[1].split('|')[0];
+  if (!uri) return undefined;
+  try {
+    const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+    return `data:${imageMime(uri)};base64,${base64}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function askAI(options: {
   settings: AISettings;
   bookTitle: string;
@@ -16,6 +38,7 @@ export async function askAI(options: {
   bookDescription?: string;
   chapter: Chapter;
   paragraphIndex: number;
+  selectedText?: string;
   intent: AIIntent;
   question?: string;
   contextRadius?: number;
@@ -28,15 +51,21 @@ export async function askAI(options: {
   const start = Math.max(0, paragraphIndex - radius);
   const end = Math.min(chapter.paragraphs.length, paragraphIndex + radius + 1);
   const contextImages: string[] = [];
-  const context = chapter.paragraphs.slice(start, end).map((text, i) => {
+  const contextParts: string[] = [];
+  const contextParagraphs = chapter.paragraphs.slice(start, end);
+  for (let i = 0; i < contextParagraphs.length; i++) {
+    const text = contextParagraphs[i];
     const current = start + i === paragraphIndex;
-    const image = text.match(/^\[\[MOWEN_IMAGE_DATA:(data:image\/[\s\S]+)\]\]$/)?.[1];
+    const image = await resolveImageBlock(text);
     if (image && image.length <= 6_000_000 && contextImages.length < 4) contextImages.push(image);
-    const safeText = image
+    const safeText = current && options.selectedText?.trim()
+      ? options.selectedText.trim()
+      : image
       ? `【此处有一幅插图${image.length > 6_000_000 ? '，因文件过大未上传' : '，见随附图片'}】`
       : text.replace(/\[\[MOWEN_NOTE_REF:[^\]]+\]\]/g, '〔脚注〕');
-    return `${current ? '【当前段】' : '【上下文】'}${safeText}`;
-  }).join('\n\n');
+    contextParts.push(`${current ? '【当前段】' : '【上下文】'}${safeText}`);
+  }
+  const context = contextParts.join('\n\n');
   // Explicit user attachments take priority when the four-image request limit is reached.
   const allImages = [...(options.additionalImages ?? []), ...contextImages]
     .filter((value, index, values) => value.startsWith('data:image/') && values.indexOf(value) === index)
