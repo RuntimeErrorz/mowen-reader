@@ -272,8 +272,6 @@ function LibraryScreen(props: {
   onRemove: (book: BookSummary) => void;
   onSettings: () => void;
 }) {
-  const active = [...props.library].sort((a, b) => b.lastReadAt - a.lastReadAt)[0];
-  const totalProgress = props.library.reduce((sum, item) => sum + item.progress, 0);
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.library, { backgroundColor: props.palette.bg }]}>
       <NativeStatusBar backgroundColor={props.palette.bg} barStyle={props.palette.bg === '#142428' ? 'light-content' : 'dark-content'} />
@@ -288,27 +286,9 @@ function LibraryScreen(props: {
       </View>
 
       <ScrollView contentContainerStyle={styles.libraryScroll} showsVerticalScrollIndicator={false}>
-        {active && (
-          <Pressable disabled={!!props.openingBookId} onPress={() => props.onOpen(active)} style={({ pressed }) => [styles.continueCard, pressed && styles.cardPressed]}>
-            <LinearGradient colors={[props.palette.surfaceAlt, props.palette.bar]} style={styles.continueInner}>
-              <View style={styles.continueTop}>
-                <Text style={[styles.continueLabel, { color: props.palette.accent }]}>继续阅读</Text>
-                <Text style={[styles.continuePercent, { color: props.palette.accent }]}>{Math.round(active.progress * 100)}%</Text>
-              </View>
-              <Text numberOfLines={2} style={[styles.continueTitle, { color: props.palette.text }]}>{active.title}</Text>
-              <Text numberOfLines={1} style={[styles.continueAuthor, { color: props.palette.muted }]}>{active.author}</Text>
-              <View style={[styles.progressTrack, { backgroundColor: props.palette.line }]}><View style={[styles.progressFill, { backgroundColor: props.palette.accent, width: `${Math.max(3, active.progress * 100)}%` }]} /></View>
-              <View style={styles.continueFoot}>
-                <Text style={[styles.continueMeta, { color: props.palette.muted }]}>第 {active.currentChapter + 1} / {active.chapterCount} 章</Text>
-                <View style={[styles.arrowCircle, { backgroundColor: props.palette.accent }]}>{props.openingBookId === active.id ? <ActivityIndicator size="small" color={props.palette.onAccent} /> : <Ionicons name="arrow-forward" size={17} color={props.palette.onAccent} />}</View>
-              </View>
-            </LinearGradient>
-          </Pressable>
-        )}
-
         <View style={styles.sectionHead}>
           <Text style={[styles.sectionTitle, { color: props.palette.text }]}>书架</Text>
-          <Text style={[styles.sectionCount, { color: props.palette.muted }]}>{props.library.length} 本 · 累计进度 {Math.round(totalProgress * 100)}%</Text>
+          <Text style={[styles.sectionCount, { color: props.palette.muted }]}>{props.library.length} 本</Text>
         </View>
         <View style={styles.bookGrid}>
           {props.library.map((item, index) => (
@@ -613,22 +593,25 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
           {location.position} / {location.totalPositions}
         </Text>
       )}
-      <ReaderToolbar
-        visible={chromeVisible}
-        animation={chromeAnim}
-        palette={palette}
-        progress={exactProgress}
-        chapter={chapterIndex}
-        chapterCount={Math.max(1, toc.length || props.book.chapters.length)}
-        marginCount={props.bookmarks.length + props.conversations.length}
-        onContents={() => setTocOpen(true)}
-        onAppearance={() => setTypeOpen(true)}
-        onMargins={() => setBookmarksOpen(true)}
-        onProgressStart={beginProgressDrag}
-        onProgressMove={moveProgressDrag}
-        onProgressEnd={finishProgressDrag}
-      />
-      {dragProgress !== null && (
+      {!readerNavigation.noteOpen && (
+        <ReaderToolbar
+          visible={chromeVisible}
+          animation={chromeAnim}
+          palette={palette}
+          progress={exactProgress}
+          chapter={chapterIndex}
+          chapterCount={Math.max(1, toc.length || props.book.chapters.length)}
+          marginCount={props.bookmarks.length + props.conversations.length}
+          onBack={props.onBack}
+          onContents={() => setTocOpen(true)}
+          onAppearance={() => setTypeOpen(true)}
+          onMargins={() => setBookmarksOpen(true)}
+          onProgressStart={beginProgressDrag}
+          onProgressMove={moveProgressDrag}
+          onProgressEnd={finishProgressDrag}
+        />
+      )}
+      {dragProgress !== null && !readerNavigation.noteOpen && (
         <View pointerEvents="none" style={[styles.liveProgressCard, { backgroundColor: palette.bar, borderColor: palette.line }]}>
           <View style={styles.liveProgressTop}><Text style={[styles.liveProgressLabel, { color: palette.accent }]}>全书进度</Text><Text style={[styles.liveProgressPercent, { color: palette.text }]}>{Math.round(dragProgress * 100)}%</Text></View>
           <Text numberOfLines={1} style={[styles.liveProgressChapter, { color: palette.text }]}>{chapter.title}</Text>
@@ -1007,6 +990,7 @@ const ReaderToolbar = memo(function ReaderToolbar(props: {
   chapter: number;
   chapterCount: number;
   marginCount: number;
+  onBack: () => void;
   onContents: () => void;
   onAppearance: () => void;
   onMargins: () => void;
@@ -1023,6 +1007,7 @@ const ReaderToolbar = memo(function ReaderToolbar(props: {
       transform: [{ translateY: props.animation.interpolate({ inputRange: [0, 1], outputRange: [82, 0] }) }],
     }]}
   >
+    <Pressable accessibilityLabel="返回" onPress={props.onBack} style={styles.bottomAction}><Ionicons name="arrow-back" size={22} color={props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>返回</Text></Pressable>
     <Pressable onPress={props.onContents} style={styles.bottomAction}><Ionicons name="list" size={22} color={props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>目录</Text></Pressable>
     <View
       accessibilityLabel="长按调整全书进度"
@@ -1365,18 +1350,6 @@ const styles = StyleSheet.create({
   iconButtonDark: { width: 42, height: 42, borderRadius: 21, borderWidth: 1, borderColor: '#385057', alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.65, transform: [{ scale: 0.97 }] },
   libraryScroll: { paddingHorizontal: 24, paddingBottom: 48 },
-  continueCard: { borderRadius: 2, overflow: 'hidden', elevation: 5, shadowColor: '#071315', shadowOffset: { width: 0, height: 7 }, shadowOpacity: 0.25, shadowRadius: 14 },
-  continueInner: { padding: 22, minHeight: 205 },
-  continueTop: { flexDirection: 'row', justifyContent: 'space-between' },
-  continueLabel: { color: C.seaPale, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
-  continuePercent: { color: C.seaPale, fontSize: 12 },
-  continueTitle: { color: C.white, fontSize: 24, lineHeight: 32, marginTop: 18, fontFamily: Platform.select({ android: 'serif', ios: 'Songti SC' }) },
-  continueAuthor: { color: '#A9BBBC', fontSize: 12, marginTop: 7 },
-  progressTrack: { height: 2, backgroundColor: '#496267', marginTop: 21 },
-  progressFill: { height: 2, backgroundColor: C.seaPale },
-  continueFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14 },
-  continueMeta: { color: '#8FA6A8', fontSize: 11 },
-  arrowCircle: { width: 31, height: 31, borderRadius: 16, backgroundColor: C.seaPale, alignItems: 'center', justifyContent: 'center' },
   cardPressed: { opacity: 0.78, transform: [{ scale: 0.985 }] },
   sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 34, marginBottom: 18 },
   sectionTitle: { color: C.white, fontSize: 19, letterSpacing: 2, fontFamily: Platform.select({ android: 'serif', ios: 'Songti SC' }) },
@@ -1401,8 +1374,8 @@ const styles = StyleSheet.create({
   addHint: { color: '#687E80', fontSize: 9, marginTop: 5 },
   reader: { flex: 1 },
   readerIcon: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center' },
-  readerBottom: { position: 'absolute', zIndex: 20, bottom: 14, left: 14, right: 14, height: 62, borderWidth: StyleSheet.hairlineWidth, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', elevation: 9, shadowColor: '#071315', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.24, shadowRadius: 12 },
-  bottomAction: { width: 54, alignItems: 'center', gap: 3 },
+  readerBottom: { position: 'absolute', zIndex: 20, bottom: 26, left: 14, right: 14, height: 62, borderWidth: StyleSheet.hairlineWidth, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', elevation: 9, shadowColor: '#071315', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.24, shadowRadius: 12 },
+  bottomAction: { width: 50, height: 52, alignItems: 'center', justifyContent: 'center', gap: 2 },
   bottomLabel: { fontSize: 11 },
   bottomAa: { fontFamily: 'serif', fontSize: 20, fontWeight: '600', lineHeight: 22 },
   progressPill: { minWidth: 82, alignItems: 'center' },

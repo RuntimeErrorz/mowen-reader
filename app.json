@@ -10,7 +10,7 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#10272B"
     },
     "ios": {
       "supportsTablet": true
@@ -19,7 +19,7 @@
       "package": "com.mowen.reader",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#10272B"
       },
       "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false

@@ -78,7 +78,7 @@ export const defaultPrefs: ReaderPrefs = {
   theme: 'wheat',
   fontStyle: 'sans',
   pagePadding: 24,
-  pagePaddingTop: 8,
+  pagePaddingTop: 0,
   pagePaddingBottom: 36,
   pagePaddingLeft: 24,
   pagePaddingRight: 24,

@@ -117,12 +117,15 @@ const FOLIATE_BRIDGE = String.raw`
     visibleRange: null,
     previews: null,
     previewToken: 0,
-    previewIdle: 0,
     turn: null,
     gesture: null,
     pageWidth: 0,
     lastTurnDir: 1,
     resizeFrame: 0,
+    scrollIntentDir: 0,
+    scrollIntentUntil: 0,
+    scrollTurn: false,
+    scrollCheckFrame: 0,
   };
   const labelOf = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.zh || value['zh-CN'] || value.en || Object.values(value)[0] || '') : '';
   const flattenTOC = (items, depth = 0, output = []) => {
@@ -142,7 +145,7 @@ const FOLIATE_BRIDGE = String.raw`
     return [
       ':root { color-scheme: ' + (p.theme === 'night' ? 'dark' : 'light') + '; background: ' + c.bg + ' !important; color: ' + c.text + ' !important; }',
       'html, body { margin: 0 !important; padding: 0 !important; background: ' + c.bg + ' !important; color: ' + c.text + ' !important; }',
-      'html, body { touch-action: ' + (p.readingMode === 'paged' ? 'none' : 'pan-y') + ' !important; overscroll-behavior: none !important; }',
+      'html, body { touch-action: ' + (p.readingMode === 'paged' ? 'none' : 'pan-y') + ' !important; overscroll-behavior: ' + (p.readingMode === 'paged' ? 'none' : 'auto') + ' !important; }',
       'body { font-family: ' + family + ' !important; font-size: ' + p.fontSize + 'px !important; line-height: ' + p.lineHeight + ' !important; text-align: ' + align + '; overflow-wrap: break-word; }',
       ':root:root body * { font-family: inherit !important; font-size: 1em !important; line-height: inherit !important; color: inherit !important; }',
       ':root:root body h1 { font-size: 1.75em !important; line-height: 1.3 !important; color: ' + c.text + ' !important; }',
@@ -182,7 +185,10 @@ const FOLIATE_BRIDGE = String.raw`
   };
   const pageWidth = () => state.pageWidth || measurePageWidth();
   const setSurfaceX = (surface, value) => {
-    if (surface) surface.style.transform = 'translate3d(' + value + 'px,0,0)';
+    if (!surface) return;
+    const scale = Math.max(1, globalThis.devicePixelRatio || 1);
+    const aligned = Math.round(value * scale) / scale;
+    surface.style.transform = 'translate3d(' + aligned + 'px,0,0)';
   };
   const configureRenderer = (renderer, config) => {
     if (!renderer) return;
@@ -216,11 +222,6 @@ const FOLIATE_BRIDGE = String.raw`
   };
   const disposePreviews = () => {
     state.previewToken++;
-    if (state.previewIdle) {
-      globalThis.cancelIdleCallback?.(state.previewIdle);
-      globalThis.clearTimeout(state.previewIdle);
-      state.previewIdle = 0;
-    }
     for (const preview of state.previews ? [state.previews.previous, state.previews.next] : []) {
       try { preview.renderer.destroy?.(); } catch {}
       preview.surface.replaceChildren();
@@ -240,6 +241,8 @@ const FOLIATE_BRIDGE = String.raw`
       baseCfi: '',
       targetCfi: '',
       requestedToken: 0,
+      preparing: false,
+      retryAfter: 0,
       queue: Promise.resolve(),
     };
     renderer.addEventListener('relocate', event => { preview.detail = event.detail || null; });
@@ -257,9 +260,11 @@ const FOLIATE_BRIDGE = String.raw`
     return state.previews;
   };
   const preparePreview = (preview, cfi, token) => {
-    if (!preview || preview.requestedToken === token) return;
+    if (!preview || preview.requestedToken === token && (preview.ready || preview.preparing)) return;
+    if (preview.retryAfter > performance.now()) return;
     const continuesFromTarget = preview.ready && preview.targetCfi === cfi;
     preview.requestedToken = token;
+    preview.preparing = true;
     preview.ready = false;
     preview.baseCfi = '';
     preview.targetCfi = '';
@@ -282,8 +287,15 @@ const FOLIATE_BRIDGE = String.raw`
       preview.baseCfi = cfi;
       preview.targetCfi = targetCfi;
       preview.ready = true;
+      preview.retryAfter = 0;
       preview.surface.style.willChange = 'transform';
       if (state.gesture) queueGestureFrame(state.gesture);
+    }).catch(() => {
+      if (token === state.previewToken) preview.retryAfter = performance.now() + 240;
+    }).finally(() => {
+      if (preview.requestedToken !== token) return;
+      preview.preparing = false;
+      if (!preview.ready) preview.retryAfter = Math.max(preview.retryAfter, performance.now() + 240);
     });
   };
   const preparePreviews = cfi => {
@@ -291,21 +303,13 @@ const FOLIATE_BRIDGE = String.raw`
     const previews = ensurePreviews();
     if (!previews) return;
     const token = ++state.previewToken;
-    if (state.previewIdle) {
-      globalThis.cancelIdleCallback?.(state.previewIdle);
-      globalThis.clearTimeout(state.previewIdle);
-      state.previewIdle = 0;
-    }
     const primary = state.lastTurnDir < 0 ? previews.previous : previews.next;
     const secondary = state.lastTurnDir < 0 ? previews.next : previews.previous;
+    // Each preview owns its own paginator and queue, so preparing both here is
+    // parallel. This avoids arriving at a spine boundary before the opposite
+    // direction has left the idle queue.
     preparePreview(primary, cfi, token);
-    const prepareSecondary = () => {
-      state.previewIdle = 0;
-      if (token === state.previewToken) preparePreview(secondary, cfi, token);
-    };
-    state.previewIdle = globalThis.requestIdleCallback
-      ? globalThis.requestIdleCallback(prepareSecondary, { timeout: 120 })
-      : globalThis.setTimeout(prepareSecondary, 40);
+    preparePreview(secondary, cfi, token);
   };
   const preparedPreview = dir => {
     const preview = dir < 0 ? state.previews?.previous : state.previews?.next;
@@ -373,6 +377,35 @@ const FOLIATE_BRIDGE = String.raw`
     const navigation = dir > 0 ? state.view.next() : state.view.prev();
     Promise.resolve(navigation).catch(() => {}).finally(() => finishTurn(turn));
     return true;
+  };
+  const maybeTurnScrolledSection = () => {
+    if (
+      !state.view
+      || state.config?.prefs.readingMode !== 'scroll'
+      || state.scrollTurn
+      || state.scrollIntentUntil < performance.now()
+    ) return false;
+    const renderer = state.view.renderer;
+    const dir = state.scrollIntentDir;
+    const atBoundary = dir > 0
+      ? renderer.viewSize - renderer.end <= 2
+      : dir < 0 && renderer.start <= 2;
+    if (!dir || !atBoundary) return false;
+    state.scrollTurn = true;
+    state.scrollIntentDir = 0;
+    state.scrollIntentUntil = 0;
+    const navigation = dir > 0 ? state.view.next() : state.view.prev();
+    Promise.resolve(navigation).catch(() => {}).finally(() => {
+      globalThis.setTimeout(() => { state.scrollTurn = false; }, 80);
+    });
+    return true;
+  };
+  const queueScrolledBoundaryCheck = () => {
+    if (state.scrollCheckFrame || state.config?.prefs.readingMode !== 'scroll') return;
+    state.scrollCheckFrame = globalThis.requestAnimationFrame(() => {
+      state.scrollCheckFrame = 0;
+      maybeTurnScrolledSection();
+    });
   };
   const pager = {
     begin(x, y, time) {
@@ -481,6 +514,8 @@ const FOLIATE_BRIDGE = String.raw`
       configureRenderer(preview.renderer, config);
     pager.cancel();
     if (paged) {
+      state.scrollIntentDir = 0;
+      state.scrollIntentUntil = 0;
       ensurePreviews();
       preparePreviews(state.currentCfi);
     } else disposePreviews();
@@ -586,11 +621,23 @@ const FOLIATE_BRIDGE = String.raw`
       if (event.touches.length !== 1) return;
       doc.getSelection?.()?.removeAllRanges?.();
       const point = event.touches[0];
-      touch = { x: point.clientX, y: point.clientY, screenX: point.screenX, started: Date.now(), target: event.target, moved: false, longPressed: false };
+      touch = {
+        x: point.clientX,
+        y: point.clientY,
+        lastScreenY: point.screenY,
+        screenX: point.screenX,
+        started: Date.now(),
+        target: event.target,
+        moved: false,
+        longPressed: false
+      };
       if (state.config?.prefs.readingMode === 'paged') {
         pager.begin(point.screenX, point.screenY, event.timeStamp);
         if (!interactive(event.target)) event.preventDefault();
         event.stopImmediatePropagation();
+      } else {
+        state.scrollIntentDir = 0;
+        state.scrollIntentUntil = 0;
       }
       clearLongPress();
       if (!longPressBlocked(event.target)) {
@@ -616,7 +663,15 @@ const FOLIATE_BRIDGE = String.raw`
         const consumed = pager.move(point.screenX, point.screenY, event.timeStamp);
         event.stopImmediatePropagation();
         if (consumed) event.preventDefault();
-      } else if (!touch.moved) event.stopImmediatePropagation();
+      } else {
+        const deltaY = point.screenY - touch.lastScreenY;
+        touch.lastScreenY = point.screenY;
+        if (Math.abs(deltaY) >= 1) {
+          state.scrollIntentDir = deltaY < 0 ? 1 : -1;
+          state.scrollIntentUntil = performance.now() + 1600;
+          queueScrolledBoundaryCheck();
+        }
+      }
     }, { passive: false, capture: true });
     doc.addEventListener('touchend', event => {
       clearLongPress();
@@ -632,7 +687,10 @@ const FOLIATE_BRIDGE = String.raw`
         event.preventDefault();
         return;
       }
-      if (!finished.moved) event.stopImmediatePropagation();
+      if (state.config?.prefs.readingMode === 'scroll' && finished.moved) {
+        state.scrollIntentUntil = performance.now() + 1600;
+        queueScrolledBoundaryCheck();
+      }
       if (finished.longPressed) { event.preventDefault(); return; }
       if (finished.moved || Date.now() - finished.started > 500 || interactive(finished.target)) return;
       if (doc.getSelection?.()?.toString?.().trim()) return;
@@ -640,7 +698,13 @@ const FOLIATE_BRIDGE = String.raw`
       suppressClickUntil = Date.now() + 500;
       doc.defaultView?.requestAnimationFrame(() => doc.defaultView?.requestAnimationFrame(() => handleTap(finished.screenX)));
     }, { passive: false, capture: true });
-    doc.addEventListener('touchcancel', () => { clearLongPress(); touch = null; pager.cancel(); }, { passive: true, capture: true });
+    doc.addEventListener('touchcancel', () => {
+      clearLongPress();
+      touch = null;
+      state.scrollIntentDir = 0;
+      state.scrollIntentUntil = 0;
+      pager.cancel();
+    }, { passive: true, capture: true });
     doc.addEventListener('click', event => {
       if (Date.now() < suppressClickUntil || event.defaultPrevented || interactive(event.target)) return;
       const x = event.screenX || (((event.clientX % (state.view?.renderer?.size || screenWidth())) + screenWidth()) % screenWidth());
@@ -811,8 +875,18 @@ const FOLIATE_BRIDGE = String.raw`
       setupFootnotes(view);
       view.history?.addEventListener?.('index-change', emitNavigationState);
       await view.open(file);
+      view.renderer.addEventListener('scroll', () => {
+        if (state.scrollIntentUntil >= performance.now()) queueScrolledBoundaryCheck();
+      });
       applyConfig(config);
-      await view.init({ lastLocation: initialCfi || (initialProgress > 0 ? { fraction: initialProgress } : null), showTextStart: !initialCfi && !(initialProgress > 0) });
+      await view.init({
+        lastLocation: initialCfi || (initialProgress > 0 ? { fraction: initialProgress } : null),
+        // A newly imported book has no saved locator. Foliate's text-start
+        // helper intentionally skips cover/frontmatter, so let init enter the
+        // first linear section instead. Existing books still restore their CFI
+        // or total progression above.
+        showTextStart: false
+      });
       emitNavigationState();
       send({ type: 'book-ready', toc: flattenTOC(view.book.toc) });
     } catch (error) {
