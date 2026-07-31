@@ -43,6 +43,8 @@ export type FoliateReaderHandle = {
   previous: () => void;
   goTo: (target: string) => void;
   goToFraction: (fraction: number) => void;
+  previewFraction: (fraction: number) => void;
+  back: () => void;
 };
 
 type Props = {
@@ -56,6 +58,7 @@ type Props = {
   onLocationChange: (location: FoliateLocation) => void;
   onCenterTap: () => void;
   onLongPress: (selection: FoliateLongPress) => void;
+  onNavigationStateChange: (state: { canGoBack: boolean; noteOpen: boolean }) => void;
   onError: (message: string) => void;
 };
 
@@ -65,7 +68,7 @@ type HostMessage =
   | ({ type: 'relocate' } & FoliateLocation)
   | { type: 'center-tap' }
   | ({ type: 'long-press' } & FoliateLongPress)
-  | { type: 'debug'; event: string; data?: Record<string, unknown> }
+  | { type: 'navigation-state'; canGoBack: boolean; noteOpen: boolean }
   | { type: 'error'; message: string };
 
 const FOLIATE_HTML = `<!doctype html>
@@ -73,33 +76,54 @@ const FOLIATE_HTML = `<!doctype html>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; font-src blob: data:; style-src 'unsafe-inline' blob:; connect-src blob: data:; frame-src blob:; script-src 'none';">
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body,foliate-view{margin:0;width:100%;height:100%;overflow:hidden}
+html,body,foliate-view,foliate-paginator{margin:0;width:100%;height:100%;overflow:hidden}
 html,body{background:#fff}
 #reader-shell{position:fixed;inset:0;overflow:hidden}
-foliate-view{display:block}
+#page-stage,#page-current,.page-preview{position:absolute;inset:0;overflow:hidden}
+#page-stage{contain:layout paint;isolation:isolate}
+#page-current,.page-preview{transform:translate3d(0,0,0);transition:none!important;backface-visibility:hidden}
+#page-current{z-index:2}
+.page-preview{z-index:1;pointer-events:none;contain:strict}
+#page-preview-prev{transform:translate3d(-100%,0,0)}
+#page-preview-next{transform:translate3d(100%,0,0)}
+foliate-view,foliate-paginator{display:block}
 foliate-view::part(head),foliate-view::part(foot){display:none}
-#note-backdrop{display:none;position:fixed;z-index:100;inset:0;background:rgba(0,0,0,.24);padding:18px;align-items:flex-end}
+#note-backdrop{display:none;position:fixed;z-index:2147483647;inset:0;background:rgba(0,0,0,.24);padding:18px;align-items:flex-end}
 #note-backdrop.open{display:flex}
 #note-card{position:relative;width:100%;max-height:58%;border-radius:16px;overflow:hidden;border:1px solid var(--line);background:var(--bg);box-shadow:0 12px 40px rgba(0,0,0,.25)}
-#note-title{padding:16px 54px 10px 20px;color:var(--text);font-size:15px;font-weight:700;border-bottom:1px solid var(--line)}
-#note-content{display:block;width:100%;max-width:100%;max-height:min(42vh,420px);padding:14px 20px 22px;overflow-x:hidden;overflow-y:auto;color:var(--text);font-size:16px;line-height:1.75;overflow-wrap:anywhere;word-break:break-word}
+#note-title{padding:15px 54px 10px 20px;color:var(--text);font-size:13px;line-height:1.45;font-weight:700;border-bottom:1px solid var(--line)}
+#note-content{display:block;width:100%;max-width:100%;max-height:min(42vh,420px);padding:13px 20px 20px;overflow-x:hidden;overflow-y:auto;color:var(--text);font-size:16px;line-height:1.65;overflow-wrap:anywhere;word-break:break-word}
 #note-content article{display:block;width:100%;max-width:100%;min-width:0}
-#note-content article *{box-sizing:border-box!important;max-width:100%!important;min-width:0!important}
+#note-content article *{box-sizing:border-box!important;max-width:100%!important;min-width:0!important;color:inherit!important;font-size:inherit!important;line-height:inherit!important}
+#note-content article :is(sup,sub){font-size:.75em!important;line-height:0!important}
 #note-content p,#note-content div,#note-content li,#note-content blockquote,#note-content dd,#note-content dt{width:auto!important;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important}
 #note-content p{margin:0 0 .8em}
 #note-content pre,#note-content code{white-space:pre-wrap!important;overflow-wrap:anywhere!important;word-break:break-word!important}
 #note-content table{display:table!important;width:100%!important;table-layout:fixed!important;border-collapse:collapse}
 #note-content th,#note-content td{width:auto!important;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important}
 #note-content img,#note-content svg,#note-content video{display:block;max-width:100%!important;width:auto!important;height:auto!important;margin-inline:auto}
-#note-content a{color:var(--accent)}
+#note-content article a{color:var(--accent)!important}
 #note-close{position:absolute;z-index:2;right:8px;top:8px;width:34px;height:34px;border:0;border-radius:17px;background:var(--bg);color:var(--muted);font-size:22px}
-</style></head><body><div id="reader-shell"></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div></body></html>`;
+</style></head><body><div id="reader-shell"><div id="page-stage"><div id="page-preview-prev" class="page-preview"></div><div id="page-current"></div><div id="page-preview-next" class="page-preview"></div></div></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div></body></html>`;
 
 const FOLIATE_BRIDGE = String.raw`
 (() => {
   const send = value => globalThis.ReactNativeWebView?.postMessage(JSON.stringify(value));
-  const debug = (event, data) => send({ type: 'debug', event, data });
-  const state = { chunks: [], config: null, view: null };
+  const state = {
+    chunks: [],
+    config: null,
+    view: null,
+    currentCfi: '',
+    visibleRange: null,
+    previews: null,
+    previewToken: 0,
+    previewIdle: 0,
+    turn: null,
+    gesture: null,
+    pageWidth: 0,
+    lastTurnDir: 1,
+    resizeFrame: 0,
+  };
   const labelOf = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.zh || value['zh-CN'] || value.en || Object.values(value)[0] || '') : '';
   const flattenTOC = (items, depth = 0, output = []) => {
     for (const item of items || []) {
@@ -118,6 +142,7 @@ const FOLIATE_BRIDGE = String.raw`
     return [
       ':root { color-scheme: ' + (p.theme === 'night' ? 'dark' : 'light') + '; background: ' + c.bg + ' !important; color: ' + c.text + ' !important; }',
       'html, body { margin: 0 !important; padding: 0 !important; background: ' + c.bg + ' !important; color: ' + c.text + ' !important; }',
+      'html, body { touch-action: ' + (p.readingMode === 'paged' ? 'none' : 'pan-y') + ' !important; overscroll-behavior: none !important; }',
       'body { font-family: ' + family + ' !important; font-size: ' + p.fontSize + 'px !important; line-height: ' + p.lineHeight + ' !important; text-align: ' + align + '; overflow-wrap: break-word; }',
       ':root:root body * { font-family: inherit !important; font-size: 1em !important; line-height: inherit !important; color: inherit !important; }',
       ':root:root body h1 { font-size: 1.75em !important; line-height: 1.3 !important; color: ' + c.text + ' !important; }',
@@ -141,30 +166,29 @@ const FOLIATE_BRIDGE = String.raw`
       '::selection { background: ' + c.focus + '; color: ' + c.text + '; }',
     ].join('\n');
   };
-  const applyConfig = config => {
-    state.config = config;
-    const shell = document.getElementById('reader-shell');
-    const paged = config.prefs.readingMode === 'paged';
-    // A paginated view must own the horizontal margins. Keeping them on this
-    // shell turns the page into a smaller moving viewport, leaving its margins
-    // behind while Foliate follows a finger.
-    shell.style.inset = paged
-      ? config.prefs.pagePaddingTop + 'px 0 ' + config.prefs.pagePaddingBottom + 'px 0'
-      : config.prefs.pagePaddingTop + 'px ' + config.prefs.pagePaddingRight + 'px ' + config.prefs.pagePaddingBottom + 'px ' + config.prefs.pagePaddingLeft + 'px';
-    document.documentElement.style.setProperty('--bg', config.palette.bg);
-    document.documentElement.style.setProperty('--text', config.palette.text);
-    document.documentElement.style.setProperty('--muted', config.palette.muted);
-    document.documentElement.style.setProperty('--line', config.palette.line);
-    document.documentElement.style.setProperty('--accent', config.palette.accent);
-    const noteContent = document.getElementById('note-content');
-    noteContent.style.fontSize = config.prefs.fontSize + 'px';
-    noteContent.style.lineHeight = String(config.prefs.lineHeight);
-    document.documentElement.style.background = config.palette.bg;
-    document.body.style.background = config.palette.bg;
-    const renderer = state.view?.renderer;
+  let surfaceCache = null;
+  const surfaces = () => surfaceCache ??= {
+    shell: document.getElementById('reader-shell'),
+    stage: document.getElementById('page-stage'),
+    current: document.getElementById('page-current'),
+    previous: document.getElementById('page-preview-prev'),
+    next: document.getElementById('page-preview-next'),
+  };
+  const currentSurface = () => surfaces().current;
+  const previewSurface = dir => dir < 0 ? surfaces().previous : surfaces().next;
+  const measurePageWidth = () => {
+    state.pageWidth = Math.max(1, surfaces().shell.getBoundingClientRect().width);
+    return state.pageWidth;
+  };
+  const pageWidth = () => state.pageWidth || measurePageWidth();
+  const setSurfaceX = (surface, value) => {
+    if (surface) surface.style.transform = 'translate3d(' + value + 'px,0,0)';
+  };
+  const configureRenderer = (renderer, config) => {
     if (!renderer) return;
+    const paged = config.prefs.readingMode === 'paged';
     renderer.removeAttribute('animated');
-    renderer.setAttribute('flow', config.prefs.readingMode === 'scroll' ? 'scrolled' : 'paginated');
+    renderer.setAttribute('flow', paged ? 'paginated' : 'scrolled');
     renderer.setAttribute('margin', '0px');
     const horizontalInset = config.prefs.pagePaddingLeft + config.prefs.pagePaddingRight;
     const desiredGap = horizontalInset / Math.max(1, globalThis.innerWidth || 1);
@@ -175,6 +199,291 @@ const FOLIATE_BRIDGE = String.raw`
     renderer.setAttribute('gap', paged ? gap + '%' : '0%');
     renderer.setAttribute('max-column-count', '1');
     renderer.setStyles?.(styleText(config));
+  };
+  const resetSurfaces = () => {
+    const width = pageWidth();
+    const current = currentSurface();
+    const previous = previewSurface(-1);
+    const next = previewSurface(1);
+    setSurfaceX(current, 0);
+    setSurfaceX(previous, -width);
+    setSurfaceX(next, width);
+    if (current) {
+      if (state.config?.prefs.readingMode === 'paged') current.style.willChange = 'transform';
+      else current.style.removeProperty('will-change');
+    }
+    for (const surface of [previous, next]) surface?.style.removeProperty('will-change');
+  };
+  const disposePreviews = () => {
+    state.previewToken++;
+    if (state.previewIdle) {
+      globalThis.cancelIdleCallback?.(state.previewIdle);
+      globalThis.clearTimeout(state.previewIdle);
+      state.previewIdle = 0;
+    }
+    for (const preview of state.previews ? [state.previews.previous, state.previews.next] : []) {
+      try { preview.renderer.destroy?.(); } catch {}
+      preview.surface.replaceChildren();
+    }
+    state.previews = null;
+    resetSurfaces();
+  };
+  const createPreview = dir => {
+    const surface = previewSurface(dir);
+    const renderer = document.createElement('foliate-paginator');
+    const preview = {
+      dir,
+      surface,
+      renderer,
+      detail: null,
+      ready: false,
+      baseCfi: '',
+      targetCfi: '',
+      requestedToken: 0,
+      queue: Promise.resolve(),
+    };
+    renderer.addEventListener('relocate', event => { preview.detail = event.detail || null; });
+    renderer.open(state.view.book);
+    configureRenderer(renderer, state.config);
+    surface.replaceChildren(renderer);
+    return preview;
+  };
+  const ensurePreviews = () => {
+    if (state.previews || !state.view?.book || state.config?.prefs.readingMode !== 'paged') return state.previews;
+    state.previews = {
+      previous: createPreview(-1),
+      next: createPreview(1),
+    };
+    return state.previews;
+  };
+  const preparePreview = (preview, cfi, token) => {
+    if (!preview || preview.requestedToken === token) return;
+    const continuesFromTarget = preview.ready && preview.targetCfi === cfi;
+    preview.requestedToken = token;
+    preview.ready = false;
+    preview.baseCfi = '';
+    preview.targetCfi = '';
+    preview.surface.style.removeProperty('will-change');
+    preview.queue = preview.queue.catch(() => {}).then(async () => {
+      if (token !== state.previewToken || !state.view || state.config?.prefs.readingMode !== 'paged') return;
+      if (!continuesFromTarget) {
+        const resolved = state.view.resolveNavigation?.(cfi);
+        if (!resolved) return;
+        preview.detail = null;
+        await preview.renderer.goTo(resolved);
+        if (token !== state.previewToken) return;
+      }
+      preview.detail = null;
+      await (preview.dir < 0 ? preview.renderer.prev() : preview.renderer.next());
+      if (token !== state.previewToken || !preview.detail) return;
+      let targetCfi = '';
+      try { targetCfi = state.view.getCFI(preview.detail.index, preview.detail.range) || ''; } catch {}
+      if (!targetCfi || targetCfi === cfi) return;
+      preview.baseCfi = cfi;
+      preview.targetCfi = targetCfi;
+      preview.ready = true;
+      preview.surface.style.willChange = 'transform';
+      if (state.gesture) queueGestureFrame(state.gesture);
+    });
+  };
+  const preparePreviews = cfi => {
+    if (!cfi || state.config?.prefs.readingMode !== 'paged') return;
+    const previews = ensurePreviews();
+    if (!previews) return;
+    const token = ++state.previewToken;
+    if (state.previewIdle) {
+      globalThis.cancelIdleCallback?.(state.previewIdle);
+      globalThis.clearTimeout(state.previewIdle);
+      state.previewIdle = 0;
+    }
+    const primary = state.lastTurnDir < 0 ? previews.previous : previews.next;
+    const secondary = state.lastTurnDir < 0 ? previews.next : previews.previous;
+    preparePreview(primary, cfi, token);
+    const prepareSecondary = () => {
+      state.previewIdle = 0;
+      if (token === state.previewToken) preparePreview(secondary, cfi, token);
+    };
+    state.previewIdle = globalThis.requestIdleCallback
+      ? globalThis.requestIdleCallback(prepareSecondary, { timeout: 120 })
+      : globalThis.setTimeout(prepareSecondary, 40);
+  };
+  const preparedPreview = dir => {
+    const preview = dir < 0 ? state.previews?.previous : state.previews?.next;
+    return preview?.ready && preview.baseCfi === state.currentCfi ? preview : null;
+  };
+  const drawDrag = (rawDelta, gesture) => {
+    const width = gesture.width;
+    const dir = rawDelta < 0 ? 1 : -1;
+    const preview = preparedPreview(dir);
+    const delta = preview ? Math.max(-width, Math.min(width, rawDelta)) : rawDelta * .16;
+    if (gesture.activeDir !== dir || gesture.activePreview !== preview) {
+      if (gesture.activePreview) {
+        setSurfaceX(
+          gesture.activePreview.surface,
+          gesture.activePreview.dir < 0 ? -width : width,
+        );
+      }
+      gesture.activeDir = dir;
+      gesture.activePreview = preview;
+      if (!preview && gesture.requestedDir !== dir) {
+        gesture.requestedDir = dir;
+        const candidate = dir < 0 ? state.previews?.previous : state.previews?.next;
+        preparePreview(candidate, state.currentCfi, state.previewToken);
+      }
+    }
+    setSurfaceX(currentSurface(), delta);
+    if (gesture.activePreview) {
+      const activePreview = gesture.activePreview;
+      activePreview.surface.style.willChange = 'transform';
+      setSurfaceX(activePreview.surface, delta + (dir > 0 ? width : -width));
+    }
+  };
+  const flushGestureFrame = gesture => {
+    if (!gesture) return;
+    if (gesture.frame) {
+      globalThis.cancelAnimationFrame(gesture.frame);
+      gesture.frame = 0;
+    }
+    drawDrag(gesture.pendingDelta, gesture);
+  };
+  const queueGestureFrame = gesture => {
+    if (gesture.frame) return;
+    gesture.frame = globalThis.requestAnimationFrame(() => {
+      gesture.frame = 0;
+      if (state.gesture === gesture) drawDrag(gesture.pendingDelta, gesture);
+    });
+  };
+  const finishTurn = turn => {
+    if (state.turn !== turn) return;
+    state.turn = null;
+    resetSurfaces();
+    preparePreviews(state.currentCfi);
+  };
+  const turnPage = dir => {
+    if (!state.view || state.config?.prefs.readingMode !== 'paged' || state.turn) return false;
+    const width = pageWidth();
+    const preview = preparedPreview(dir);
+    const turn = { id: Date.now() + Math.random(), dir };
+    state.lastTurnDir = dir;
+    state.turn = turn;
+    if (preview) {
+      setSurfaceX(currentSurface(), dir > 0 ? -width : width);
+      setSurfaceX(preview.surface, 0);
+    } else resetSurfaces();
+    const navigation = dir > 0 ? state.view.next() : state.view.prev();
+    Promise.resolve(navigation).catch(() => {}).finally(() => finishTurn(turn));
+    return true;
+  };
+  const pager = {
+    begin(x, y, time) {
+      if (state.config?.prefs.readingMode !== 'paged' || state.turn) return false;
+      ensurePreviews();
+      const width = measurePageWidth();
+      const gesture = {
+        startX: x,
+        startY: y,
+        lastX: x,
+        lastTime: time,
+        delta: 0,
+        pendingDelta: 0,
+        velocity: 0,
+        axis: null,
+        frame: 0,
+        width,
+        activeDir: 0,
+        activePreview: null,
+        requestedDir: 0,
+      };
+      state.gesture = gesture;
+      const current = currentSurface();
+      if (current) current.style.willChange = 'transform';
+      return true;
+    },
+    move(x, y, time) {
+      const gesture = state.gesture;
+      if (!gesture) return false;
+      const dx = x - gesture.startX;
+      const dy = y - gesture.startY;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      const dt = Math.max(1, time - gesture.lastTime);
+      const instantVelocity = (x - gesture.lastX) / dt;
+      gesture.velocity = gesture.velocity * .72 + instantVelocity * .28;
+      gesture.lastX = x;
+      gesture.lastTime = time;
+      gesture.delta = dx;
+      gesture.pendingDelta = dx;
+      if (!gesture.axis && Math.max(absX, absY) >= 3)
+        gesture.axis = absY > absX * 1.15 ? 'vertical' : 'horizontal';
+      if (gesture.axis === 'vertical') {
+        resetSurfaces();
+        return false;
+      }
+      if (!gesture.axis && absY > absX) return true;
+      queueGestureFrame(gesture);
+      return true;
+    },
+    end() {
+      const gesture = state.gesture;
+      if (!gesture) return { moved: false, committed: false };
+      state.gesture = null;
+      flushGestureFrame(gesture);
+      const width = gesture.width;
+      const moved = gesture.axis === 'horizontal' && Math.abs(gesture.delta) >= 4;
+      const projectedDelta = gesture.delta + gesture.velocity * 180;
+      const dir = projectedDelta < 0 ? 1 : -1;
+      const hasTarget = !!preparedPreview(dir);
+      const distanceTowardTarget = dir > 0 ? -gesture.delta : gesture.delta;
+      const velocityTowardTarget = dir > 0 ? -gesture.velocity : gesture.velocity;
+      const committed = moved && hasTarget
+        && (distanceTowardTarget >= width * .16 || velocityTowardTarget >= .32);
+      if (committed) turnPage(dir);
+      else resetSurfaces();
+      return { moved, committed };
+    },
+    cancel() {
+      const gesture = state.gesture;
+      state.gesture = null;
+      if (gesture?.frame) globalThis.cancelAnimationFrame(gesture.frame);
+      resetSurfaces();
+    },
+    turn: turnPage,
+    relocate(cfi) {
+      state.currentCfi = cfi || '';
+      if (state.turn) {
+        const turn = state.turn;
+        state.turn = null;
+        resetSurfaces();
+        Promise.resolve().then(() => { if (state.turn !== turn) preparePreviews(state.currentCfi); });
+      } else preparePreviews(state.currentCfi);
+    },
+  };
+  const applyConfig = config => {
+    state.config = config;
+    const shell = surfaces().shell;
+    const paged = config.prefs.readingMode === 'paged';
+    // A paginated view must own the horizontal margins. Keeping them on this
+    // shell turns the page into a smaller moving viewport, leaving its margins
+    // behind while Foliate follows a finger.
+    shell.style.inset = paged
+      ? config.prefs.pagePaddingTop + 'px 0 ' + config.prefs.pagePaddingBottom + 'px 0'
+      : config.prefs.pagePaddingTop + 'px ' + config.prefs.pagePaddingRight + 'px ' + config.prefs.pagePaddingBottom + 'px ' + config.prefs.pagePaddingLeft + 'px';
+    state.pageWidth = 0;
+    document.documentElement.style.setProperty('--bg', config.palette.bg);
+    document.documentElement.style.setProperty('--text', config.palette.text);
+    document.documentElement.style.setProperty('--muted', config.palette.muted);
+    document.documentElement.style.setProperty('--line', config.palette.line);
+    document.documentElement.style.setProperty('--accent', config.palette.accent);
+    document.documentElement.style.background = config.palette.bg;
+    document.body.style.background = config.palette.bg;
+    configureRenderer(state.view?.renderer, config);
+    for (const preview of state.previews ? [state.previews.previous, state.previews.next] : [])
+      configureRenderer(preview.renderer, config);
+    pager.cancel();
+    if (paged) {
+      ensurePreviews();
+      preparePreviews(state.currentCfi);
+    } else disposePreviews();
   };
   const attachDocumentGestures = ({ doc, index }) => {
     let touch = null;
@@ -188,6 +497,27 @@ const FOLIATE_BRIDGE = String.raw`
       longPressTimer = 0;
     };
     const readableBlock = target => target?.closest?.('p,li,blockquote,h1,h2,h3,h4,h5,h6,dd,dt,figcaption');
+    const visibleSelectionRange = range => {
+      const visible = state.visibleRange;
+      const RangeType = doc.defaultView?.Range;
+      if (!visible || !RangeType || visible.startContainer?.ownerDocument !== doc) return range;
+      try {
+        if (
+          range.compareBoundaryPoints(RangeType.END_TO_START, visible) <= 0
+          || range.compareBoundaryPoints(RangeType.START_TO_END, visible) >= 0
+        ) return range;
+        const clipped = doc.createRange();
+        if (range.compareBoundaryPoints(RangeType.START_TO_START, visible) < 0)
+          clipped.setStart(visible.startContainer, visible.startOffset);
+        else clipped.setStart(range.startContainer, range.startOffset);
+        if (range.compareBoundaryPoints(RangeType.END_TO_END, visible) > 0)
+          clipped.setEnd(visible.endContainer, visible.endOffset);
+        else clipped.setEnd(range.endContainer, range.endOffset);
+        return clipped.collapsed ? range : clipped;
+      } catch {
+        return range;
+      }
+    };
     const blobDataURL = blob => new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
@@ -206,6 +536,14 @@ const FOLIATE_BRIDGE = String.raw`
       } catch { return ''; }
     };
     const emitLongPress = async target => {
+      // Foliate treats any selection created between pointerdown and pointerup
+      // as an actively dragged selection and turns the page when it crosses the
+      // visible range. This selection is created by our long-press action, so
+      // end that pointer-selection state before setting the programmatic range.
+      try {
+        const EventType = doc.defaultView?.Event;
+        if (EventType) doc.dispatchEvent(new EventType('pointerup'));
+      } catch {}
       const image = target?.closest?.('img');
       if (image) {
         const range = doc.createRange();
@@ -228,20 +566,20 @@ const FOLIATE_BRIDGE = String.raw`
       range.selectNodeContents(block);
       const text = block.textContent?.replace(/\s+/g, ' ').trim() || '';
       if (!text) return false;
+      const selectedRange = visibleSelectionRange(range);
       selection?.removeAllRanges?.();
-      selection?.addRange?.(range);
+      selection?.addRange?.(selectedRange);
       let cfi = '';
-      try { cfi = state.view?.getCFI?.(index, range) || ''; } catch {}
+      try { cfi = state.view?.getCFI?.(index, selectedRange) || ''; } catch {}
       send({ type: 'long-press', cfi, sectionIndex: index, text: text.slice(0, 1600), kind: 'text' });
       return true;
     };
     const handleTap = screenX => {
-      if (state.config?.prefs.readingMode === 'scroll') { debug('tap', { action: 'menu', mode: 'scroll', section: index }); send({ type: 'center-tap' }); return; }
+      if (state.config?.prefs.readingMode === 'scroll') { send({ type: 'center-tap' }); return; }
       const ratio = screenX / screenWidth();
       const action = ratio < .3 ? 'previous' : ratio > .7 ? 'next' : 'menu';
-      debug('tap', { action, ratio, screenX, width: screenWidth(), section: index });
-      if (action === 'previous') state.view?.prev();
-      else if (action === 'next') state.view?.next();
+      if (action === 'previous') pager.turn(-1);
+      else if (action === 'next') pager.turn(1);
       else send({ type: 'center-tap' });
     };
     doc.addEventListener('touchstart', event => {
@@ -249,17 +587,23 @@ const FOLIATE_BRIDGE = String.raw`
       doc.getSelection?.()?.removeAllRanges?.();
       const point = event.touches[0];
       touch = { x: point.clientX, y: point.clientY, screenX: point.screenX, started: Date.now(), target: event.target, moved: false, longPressed: false };
+      if (state.config?.prefs.readingMode === 'paged') {
+        pager.begin(point.screenX, point.screenY, event.timeStamp);
+        if (!interactive(event.target)) event.preventDefault();
+        event.stopImmediatePropagation();
+      }
       clearLongPress();
       if (!longPressBlocked(event.target)) {
         longPressTimer = doc.defaultView?.setTimeout(() => {
           if (!touch || touch.moved) return;
           touch.longPressed = true;
+          pager.cancel();
           suppressClickUntil = Date.now() + 700;
           globalThis.navigator?.vibrate?.(24);
           void emitLongPress(touch.target);
         }, 520) || 0;
       }
-    }, { passive: true });
+    }, { passive: false, capture: true });
     doc.addEventListener('touchmove', event => {
       if (!touch || event.touches.length !== 1) return;
       const point = event.touches[0];
@@ -267,13 +611,27 @@ const FOLIATE_BRIDGE = String.raw`
       if (Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > moveThreshold) {
         touch.moved = true;
         clearLongPress();
-      } else event.stopImmediatePropagation();
-    }, { passive: true, capture: true });
+      }
+      if (state.config?.prefs.readingMode === 'paged') {
+        const consumed = pager.move(point.screenX, point.screenY, event.timeStamp);
+        event.stopImmediatePropagation();
+        if (consumed) event.preventDefault();
+      } else if (!touch.moved) event.stopImmediatePropagation();
+    }, { passive: false, capture: true });
     doc.addEventListener('touchend', event => {
       clearLongPress();
       if (!touch) return;
       const finished = touch;
       touch = null;
+      const pageResult = state.config?.prefs.readingMode === 'paged'
+        ? pager.end()
+        : { moved: false, committed: false };
+      if (state.config?.prefs.readingMode === 'paged') event.stopImmediatePropagation();
+      if (pageResult.moved) {
+        suppressClickUntil = Date.now() + 500;
+        event.preventDefault();
+        return;
+      }
       if (!finished.moved) event.stopImmediatePropagation();
       if (finished.longPressed) { event.preventDefault(); return; }
       if (finished.moved || Date.now() - finished.started > 500 || interactive(finished.target)) return;
@@ -282,7 +640,7 @@ const FOLIATE_BRIDGE = String.raw`
       suppressClickUntil = Date.now() + 500;
       doc.defaultView?.requestAnimationFrame(() => doc.defaultView?.requestAnimationFrame(() => handleTap(finished.screenX)));
     }, { passive: false, capture: true });
-    doc.addEventListener('touchcancel', () => { clearLongPress(); touch = null; }, { passive: true });
+    doc.addEventListener('touchcancel', () => { clearLongPress(); touch = null; pager.cancel(); }, { passive: true, capture: true });
     doc.addEventListener('click', event => {
       if (Date.now() < suppressClickUntil || event.defaultPrevented || interactive(event.target)) return;
       const x = event.screenX || (((event.clientX % (state.view?.renderer?.size || screenWidth())) + screenWidth()) % screenWidth());
@@ -315,6 +673,12 @@ const FOLIATE_BRIDGE = String.raw`
     while (node?.matches?.(inline) && node.parentElement && node.parentElement !== source.body) node = node.parentElement;
     return node?.closest?.('li,p,aside,blockquote,dd,dt,section,div') || node;
   };
+  const noteIsOpen = () => document.getElementById('note-backdrop')?.classList.contains('open') ?? false;
+  const emitNavigationState = () => send({
+    type: 'navigation-state',
+    canGoBack: noteIsOpen() || !!state.view?.history?.canGoBack,
+    noteOpen: noteIsOpen(),
+  });
   const showNote = (fragment, marker) => {
     const article = document.createElement('article');
     article.appendChild(document.importNode(fragment, true));
@@ -324,6 +688,7 @@ const FOLIATE_BRIDGE = String.raw`
     content.replaceChildren(article);
     document.getElementById('note-title').textContent = marker ? '注释 ' + marker : '注释';
     document.getElementById('note-backdrop').classList.add('open');
+    emitNavigationState();
   };
   const showNoteError = (marker, message) => {
     const text = document.createElement('p');
@@ -331,12 +696,24 @@ const FOLIATE_BRIDGE = String.raw`
     document.getElementById('note-content').replaceChildren(text);
     document.getElementById('note-title').textContent = marker ? '注释 ' + marker : '注释';
     document.getElementById('note-backdrop').classList.add('open');
+    emitNavigationState();
+  };
+  const isBacklink = anchor => {
+    const type = anchor?.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || '';
+    const role = anchor?.getAttribute?.('role') || '';
+    const classes = (anchor?.getAttribute?.('class') || '') + ' ' + (anchor?.getAttribute?.('id') || '');
+    return /(?:doc-)?backlink/i.test(type + ' ' + role)
+      || /(?:^|[\s_-])(backlink|backref|return)(?:[\s_-]|$)/i.test(classes);
   };
   const setupFootnotes = view => {
     view.addEventListener('link', event => {
       const { a, href } = event.detail || {};
       const note = isNoteLink(a);
-      debug('link', { href: String(href || ''), rawHref: a?.getAttribute?.('href') || '', className: a?.getAttribute?.('class') || '', note });
+      if (!note && isBacklink(a) && view.history?.canGoBack) {
+        event.preventDefault();
+        view.history.back();
+        return;
+      }
       if (!note) return;
       event.preventDefault();
       const rawHref = a?.getAttribute?.('href') || '';
@@ -366,10 +743,37 @@ const FOLIATE_BRIDGE = String.raw`
       }).catch(error => showNoteError(markerText, error?.message || String(error)));
     });
   };
-  const closeNote = () => document.getElementById('note-backdrop').classList.remove('open');
+  const closeNote = () => {
+    document.getElementById('note-backdrop').classList.remove('open');
+    emitNavigationState();
+  };
+  const back = () => {
+    if (noteIsOpen()) {
+      closeNote();
+      return true;
+    }
+    if (!state.view?.history?.canGoBack) return false;
+    pager.cancel();
+    state.view.history.back();
+    return true;
+  };
+  const previewFraction = fraction => {
+    const value = Math.max(0, Math.min(1, Number(fraction)));
+    const resolved = state.view?.resolveNavigation?.({ fraction: value });
+    return resolved ? state.view?.renderer?.goTo?.(resolved) : undefined;
+  };
   const start = () => {
     document.getElementById('note-close').addEventListener('click', closeNote);
     document.getElementById('note-backdrop').addEventListener('click', event => { if (event.target.id === 'note-backdrop') closeNote(); });
+    globalThis.addEventListener('resize', () => {
+      state.pageWidth = 0;
+      if (state.resizeFrame) globalThis.cancelAnimationFrame(state.resizeFrame);
+      state.resizeFrame = globalThis.requestAnimationFrame(() => {
+        state.resizeFrame = 0;
+        pager.cancel();
+        measurePageWidth();
+      });
+    }, { passive: true });
     send({ type: 'host-ready' });
   };
   const open = async ({ name, initialCfi, initialProgress, config }) => {
@@ -381,16 +785,18 @@ const FOLIATE_BRIDGE = String.raw`
       const file = new File([bytes], name || 'book.epub', { type: 'application/epub+zip' });
       const view = document.createElement('foliate-view');
       state.view = view;
-      document.getElementById('reader-shell').replaceChildren(view);
+      document.getElementById('page-current').replaceChildren(view);
       view.addEventListener('load', event => attachDocumentGestures(event.detail));
       view.addEventListener('relocate', event => {
         const d = event.detail || {};
+        state.visibleRange = d.range?.cloneRange?.() || null;
         const location = d.location || {};
         const sectionIndex = d.section?.current ?? 0;
         const sectionFractions = view.getSectionFractions?.() || [];
         const sectionStart = sectionFractions[sectionIndex] ?? 0;
         const sectionEnd = sectionFractions[sectionIndex + 1] ?? 1;
         const sectionProgression = Math.max(0, Math.min(1, ((d.fraction ?? sectionStart) - sectionStart) / Math.max(Number.EPSILON, sectionEnd - sectionStart)));
+        pager.relocate(d.cfi || '');
         send({
           type: 'relocate',
           cfi: d.cfi || '',
@@ -403,9 +809,11 @@ const FOLIATE_BRIDGE = String.raw`
         });
       });
       setupFootnotes(view);
+      view.history?.addEventListener?.('index-change', emitNavigationState);
       await view.open(file);
       applyConfig(config);
       await view.init({ lastLocation: initialCfi || (initialProgress > 0 ? { fraction: initialProgress } : null), showTextStart: !initialCfi && !(initialProgress > 0) });
+      emitNavigationState();
       send({ type: 'book-ready', toc: flattenTOC(view.book.toc) });
     } catch (error) {
       send({ type: 'error', message: error?.stack || error?.message || String(error) });
@@ -415,10 +823,19 @@ const FOLIATE_BRIDGE = String.raw`
     appendChunk: chunk => state.chunks.push(chunk),
     open,
     configure: applyConfig,
-    next: () => state.view?.next(),
-    previous: () => state.view?.prev(),
+    next: () => pager.turn(1),
+    previous: () => pager.turn(-1),
     goTo: target => state.view?.goTo(target),
     goToFraction: fraction => state.view?.goToFraction(Math.max(0, Math.min(1, Number(fraction)))),
+    previewFraction,
+    back,
+    pagerStatus: () => ({
+      currentCfi: state.currentCfi,
+      previousReady: !!preparedPreview(-1),
+      nextReady: !!preparedPreview(1),
+      turning: !!state.turn,
+      dragging: !!state.gesture,
+    }),
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
@@ -444,6 +861,8 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     previous: () => call('previous'),
     goTo: (target) => call('goTo', target),
     goToFraction: (fraction) => call('goToFraction', fraction),
+    previewFraction: (fraction) => call('previewFraction', fraction),
+    back: () => call('back'),
   }), [call]);
 
   useEffect(() => {
@@ -482,13 +901,16 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     if (message.type === 'relocate') { props.onLocationChange(message); return; }
     if (message.type === 'center-tap') { props.onCenterTap(); return; }
     if (message.type === 'long-press') { props.onLongPress(message); return; }
-    if (message.type === 'debug') { console.info(`[Foliate] ${message.event}`, message.data ?? {}); return; }
+    if (message.type === 'navigation-state') {
+      props.onNavigationStateChange({ canGoBack: message.canGoBack, noteOpen: message.noteOpen });
+      return;
+    }
     if (message.type === 'error') {
       setError(message.message);
       setLoading(false);
       props.onError(message.message);
     }
-  }, [props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onReady, sendBook]);
+  }, [props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onNavigationStateChange, props.onReady, sendBook]);
 
   return (
     <View style={[styles.container, { backgroundColor: props.palette.bg }]}>

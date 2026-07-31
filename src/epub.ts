@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import { File } from 'expo-file-system';
 import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { decode } from 'html-entities';
@@ -57,8 +57,6 @@ function extractFootnotes(html: string) {
 }
 
 function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
-  const localNotes = extractFootnotes(html);
-  const availableNotes = { ...globalNotes, ...localNotes };
   const notes: Record<string, string> = {};
   const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
   const standaloneNoteRegex = /<(?:p|li|aside)\b[^>]*(?:class=["'][^"']*(?:fncontent|footnote)[^"']*["']|epub:type=["'](?:footnote|endnote)["'])[^>]*>[\s\S]*?<\/(?:p|li|aside)>/gi;
@@ -72,13 +70,13 @@ function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
     .replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_tag, attributes, inner) => {
       const href = attributes.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? '';
       const id = href.includes('#') ? href.split('#').pop() ?? '' : '';
-      if (id && availableNotes[id]) {
-        notes[id] = availableNotes[id];
+      if (id && globalNotes[id]) {
+        notes[id] = globalNotes[id];
         return `[[MOWEN_NOTE_REF:${id}]]`;
       }
       return inner;
     })
-    .replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (_tag, src) => `\n[[MOWEN_IMAGE:${src}]]\n`)
+    .replace(/<img\b[^>]*>/gi, '\n〔插图〕\n')
     .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/blockquote)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
   body = decode(body).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n');
@@ -88,16 +86,6 @@ function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
     return part.match(/.{1,420}(?:[。！？.!?；;]|$)/g)?.map((x) => x.trim()).filter(Boolean) ?? [part];
   });
   return { title, paragraphs, notes };
-}
-
-function imageMime(path: string, declared?: string) {
-  if (declared?.startsWith('image/')) return declared;
-  const extension = path.split('.').pop()?.toLowerCase();
-  if (extension === 'png') return 'image/png';
-  if (extension === 'gif') return 'image/gif';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'svg') return 'image/svg+xml';
-  return 'image/jpeg';
 }
 
 function navLabels(html: string, base: string) {
@@ -111,8 +99,7 @@ function navLabels(html: string, base: string) {
 }
 
 export async function parseEpub(uri: string, fallbackName: string): Promise<Book> {
-  const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-  const zip = await JSZip.loadAsync(base64, { base64: true });
+  const zip = await JSZip.loadAsync(await new File(uri).arrayBuffer());
   const containerText = await zip.file('META-INF/container.xml')?.async('text');
   if (!containerText) throw new Error('这不是有效的 EPUB：缺少 container.xml');
   const container = parser.parse(containerText);
@@ -129,7 +116,6 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
   const opfBase = dirname(opfPath);
   const manifestItems = asArray<any>(pkg?.manifest?.item);
   const byId = new Map(manifestItems.map((item) => [attr(item, 'id'), item]));
-  const byPath = new Map(manifestItems.map((item) => [resolvePath(opfBase, attr(item, 'href')), item]));
   const spineItems = asArray<any>(pkg?.spine?.itemref);
 
   const navItem = manifestItems.find((item) => String(attr(item, 'properties')).includes('nav'));
@@ -140,47 +126,26 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
     if (navText) labels = navLabels(navText, dirname(navPath));
   }
 
-  const documents: Array<{ index: number; item: any; path: string; html: string }> = [];
-  for (let index = 0; index < spineItems.length; index++) {
-    const item = byId.get(attr(spineItems[index], 'idref'));
-    if (!item) continue;
+  const documents = (await Promise.all(spineItems.map(async (spineItem, index) => {
+    const item = byId.get(attr(spineItem, 'idref'));
+    if (!item) return null;
     const path = resolvePath(opfBase, attr(item, 'href'));
     const html = await zip.file(path)?.async('text');
-    if (!html) continue;
-    documents.push({ index, item, path, html });
-  }
+    return html ? { index, item, path, html } : null;
+  }))).filter((document): document is { index: number; item: any; path: string; html: string } => document !== null);
   const globalNotes: Record<string, string> = {};
   documents.forEach(({ html }) => Object.assign(globalNotes, extractFootnotes(html)));
 
-  const chapters: Chapter[] = [];
-  for (const { index, item, path, html } of documents) {
+  const chapters = documents.flatMap<Chapter>(({ index, item, path, html }) => {
     const parsed = stripHtml(html, globalNotes);
-    if (!parsed.paragraphs.length) continue;
-    const paragraphs: string[] = [];
-    for (const paragraph of parsed.paragraphs) {
-      const imageMatch = paragraph.match(/^\[\[MOWEN_IMAGE:(.+)\]\]$/);
-      if (!imageMatch) {
-        paragraphs.push(paragraph);
-        continue;
-      }
-      const imagePath = resolvePath(dirname(path), imageMatch[1]);
-      const imageFile = zip.file(imagePath);
-      if (!imageFile) continue;
-      const data = await imageFile.async('base64');
-      // Keep pathological assets from making the persisted book unusably large.
-      if (data.length > 11_000_000) continue;
-      const manifestItem = byPath.get(imagePath);
-      const mime = imageMime(imagePath, attr(manifestItem, 'media-type'));
-      if (mime === 'image/svg+xml') continue;
-      paragraphs.push(`[[MOWEN_IMAGE_DATA:data:${mime};base64,${data}]]`);
-    }
-    chapters.push({
+    if (!parsed.paragraphs.length) return [];
+    return [{
       id: `${index}-${attr(item, 'id')}`,
-      title: labels.get(path) || parsed.title || `第 ${chapters.length + 1} 章`,
-      paragraphs,
+      title: labels.get(path) || parsed.title || `第 ${index + 1} 章`,
+      paragraphs: parsed.paragraphs,
       notes: parsed.notes,
-    });
-  }
+    }];
+  });
   if (!chapters.length) throw new Error('没有在这本 EPUB 中找到可阅读的正文');
 
   let cover: string | undefined;

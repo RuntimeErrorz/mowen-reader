@@ -64,6 +64,8 @@ const C = {
   ember: '#D8895B',
 };
 
+const BOOK_COVER_ASPECT_RATIO = 0.71;
+
 type Screen = 'library' | 'reader';
 
 export default function App() {
@@ -312,11 +314,13 @@ function LibraryScreen(props: {
           {props.library.map((item, index) => (
             <BookTile palette={props.palette} key={item.id} item={item} index={index} loading={props.openingBookId === item.id} disabled={!!props.openingBookId} onOpen={() => props.onOpen(item)} onRemove={() => props.onRemove(item)} />
           ))}
-          <Pressable onPress={props.onImport} style={({ pressed }) => [styles.addTile, { borderColor: props.palette.line, backgroundColor: props.palette.surface }, pressed && styles.cardPressed]}>
-            {props.importing ? <ActivityIndicator color={props.palette.accent} /> : <Ionicons name="add" size={30} color={props.palette.accent} />}
-            <Text style={[styles.addText, { color: props.palette.accent }]}>{props.importing ? '正在拆书…' : '导入 EPUB'}</Text>
-            <Text style={[styles.addHint, { color: props.palette.muted }]}>文件仅保存在本机</Text>
-          </Pressable>
+          <View style={styles.addTileWrap}>
+            <Pressable onPress={props.onImport} style={({ pressed }) => [styles.addTile, { borderColor: props.palette.line, backgroundColor: props.palette.surface }, pressed && styles.cardPressed]}>
+              {props.importing ? <ActivityIndicator color={props.palette.accent} /> : <Ionicons name="add" size={30} color={props.palette.accent} />}
+              <Text style={[styles.addText, { color: props.palette.accent }]}>{props.importing ? '正在导入…' : '导入 EPUB'}</Text>
+              <Text style={[styles.addHint, { color: props.palette.muted }]}>文件仅保存在本机</Text>
+            </Pressable>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -382,6 +386,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   const [activeHistory, setActiveHistory] = useState<AIConversation | null>(null);
   const [chromeVisible, setChromeVisible] = useState(false);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
+  const [readerNavigation, setReaderNavigation] = useState({ canGoBack: false, noteOpen: false });
   const chromeAnim = useRef(new Animated.Value(0)).current;
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const progressPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -389,7 +394,6 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   const progressDragStart = useRef({ x: 0, value: props.summary.progress });
   const progressDraft = useRef(props.summary.progress);
   const progressDragging = useRef(false);
-  const returnLocator = useRef<string | undefined>(undefined);
   const { width: windowWidth } = useWindowDimensions();
 
   const mapLocation = useCallback((next: FoliateLocation) => {
@@ -465,11 +469,6 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     if (progressTimer.current) clearTimeout(progressTimer.current);
     if (progressPreviewTimer.current) clearTimeout(progressPreviewTimer.current);
   }, []);
-  useEffect(() => {
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => { props.onBack(); return true; });
-    return () => subscription.remove();
-  }, [props.onBack]);
-
   const exactProgress = dragProgress ?? location?.progression ?? props.summary.progress;
   const currentToc = Math.max(0, location?.title ? toc.findIndex((item) => item.label.replace(/\s+/g, ' ').trim() === location.title?.replace(/\s+/g, ' ').trim()) : location?.sectionIndex ?? 0);
   const chapter = props.book.chapters[chapterIndex] ?? props.book.chapters[0];
@@ -502,7 +501,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     if (!progressPreviewTimer.current) {
       progressPreviewTimer.current = setTimeout(() => {
         progressPreviewTimer.current = null;
-        readerRef.current?.goToFraction(progressPreviewValue.current);
+        readerRef.current?.previewFraction(progressPreviewValue.current);
       }, 70);
     }
   };
@@ -550,7 +549,6 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     }]);
   };
   const openConversation = (conversation: AIConversation) => {
-    returnLocator.current = location?.cfi;
     if (conversation.locator?.type === 'application/epub+cfi' && conversation.locator.href) {
       readerRef.current?.goTo(conversation.locator.href);
     } else {
@@ -562,11 +560,35 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     setBookmarksOpen(false);
     setTimeout(() => setActiveHistory(conversation), 100);
   };
-  const closeConversation = () => {
+  const closeConversation = useCallback(() => {
     setActiveHistory(null);
-    if (returnLocator.current) readerRef.current?.goTo(returnLocator.current);
-    returnLocator.current = undefined;
-  };
+    readerRef.current?.back();
+  }, []);
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (readerNavigation.noteOpen) {
+        readerRef.current?.back();
+        return true;
+      }
+      if (activeHistory) { closeConversation(); return true; }
+      if (aiOpen) { setAiOpen(false); return true; }
+      if (bookmarksOpen) { setBookmarksOpen(false); return true; }
+      if (typeOpen) { setTypeOpen(false); return true; }
+      if (tocOpen) { setTocOpen(false); return true; }
+      if (chromeVisible) {
+        setChromeVisible(false);
+        chromeAnim.setValue(0);
+        return true;
+      }
+      if (readerNavigation.canGoBack) {
+        readerRef.current?.back();
+        return true;
+      }
+      props.onBack();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [activeHistory, aiOpen, bookmarksOpen, chromeAnim, chromeVisible, closeConversation, props.onBack, readerNavigation.canGoBack, readerNavigation.noteOpen, tocOpen, typeOpen]);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.reader, { backgroundColor: palette.bg }]}>
@@ -583,9 +605,10 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         onLocationChange={handleLocationChange}
         onCenterTap={toggleChrome}
         onLongPress={handleLongPress}
+        onNavigationStateChange={setReaderNavigation}
         onError={(message) => Alert.alert('Foliate 无法打开 EPUB', message)}
       />
-      {!!location && !chromeVisible && (
+      {!!location && !chromeVisible && !readerNavigation.noteOpen && (
         <Text pointerEvents="none" style={{ position: 'absolute', right: Math.max(16, props.prefs.pagePaddingRight), bottom: 16, color: palette.muted, fontSize: 11 }}>
           {location.position} / {location.totalPositions}
         </Text>
@@ -655,7 +678,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         palette={palette}
         onUpdate={(conversation) => { setActiveHistory(conversation); props.onConversationSave(conversation); }}
         onReturn={closeConversation}
-        onStay={() => { setActiveHistory(null); returnLocator.current = undefined; }}
+        onStay={() => setActiveHistory(null)}
       />
     </SafeAreaView>
   );
@@ -886,7 +909,6 @@ function ConversationViewerModal(props: {
 }
 
 function TypeModal({ visible, value, onChange, onClose }: { visible: boolean; value: ReaderPrefs; onChange: (value: ReaderPrefs) => void; onClose: () => void }) {
-  const [trackWidth, setTrackWidth] = useState(1);
   const previewPalette = getReaderPalette(value.theme);
   const themes: { key: ReaderPrefs['theme']; name: string; color: string }[] = [
     { key: 'paper', name: '纸白', color: '#E9ECE5' },
@@ -915,27 +937,18 @@ function TypeModal({ visible, value, onChange, onClose }: { visible: boolean; va
             </View>
           </View>
         </View>
-        <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>字号</Text>
-        <View style={styles.sizeControl}>
-          <Pressable accessibilityLabel="减小字号" onPress={() => onChange({ ...value, fontSize: Math.max(15, value.fontSize - 1) })} style={({ pressed }) => [styles.sizeButton, { backgroundColor: previewPalette.control, borderColor: previewPalette.line }, pressed && { backgroundColor: previewPalette.focus }]}><Ionicons name="remove" size={21} color={previewPalette.text} /></Pressable>
-          <Pressable
-            accessibilityRole="adjustable"
-            accessibilityLabel={`字号 ${value.fontSize}`}
-            onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
-            onPress={(event) => {
-              const ratio = Math.max(0, Math.min(1, event.nativeEvent.locationX / trackWidth));
-              onChange({ ...value, fontSize: 15 + Math.round(ratio * 11) });
-            }}
-            style={styles.sizeTrackTouch}
-          >
-            <View style={[styles.sizeTrack, { backgroundColor: previewPalette.line }]}>
-              <View style={[styles.sizeFill, { backgroundColor: previewPalette.accent, width: `${((value.fontSize - 15) / 11) * 100}%` }]} />
-              <View style={[styles.sizeThumb, { backgroundColor: previewPalette.accent, left: `${((value.fontSize - 15) / 11) * 100}%` }]} />
-            </View>
-          </Pressable>
-          <Pressable accessibilityLabel="增大字号" onPress={() => onChange({ ...value, fontSize: Math.min(26, value.fontSize + 1) })} style={({ pressed }) => [styles.sizeButton, { backgroundColor: previewPalette.control, borderColor: previewPalette.line }, pressed && { backgroundColor: previewPalette.focus }]}><Ionicons name="add" size={21} color={previewPalette.text} /></Pressable>
+        <View style={styles.fontSizeSliderRow}>
+          <SpacingSlider
+            palette={previewPalette}
+            label="字号"
+            value={value.fontSize}
+            minimum={14}
+            maximum={36}
+            step={1}
+            format={(next) => `${Math.round(next)} pt`}
+            onChange={(fontSize) => onChange({ ...value, fontSize })}
+          />
         </View>
-        <Text style={[styles.sizeValue, { color: previewPalette.muted }]}>{value.fontSize} pt</Text>
 
         <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>正文字体</Text>
         <View style={styles.optionRow}>
@@ -962,8 +975,8 @@ function TypeModal({ visible, value, onChange, onClose }: { visible: boolean; va
 
         <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>排版间距</Text>
         <View style={styles.spacingSliderRow}>
-          <SpacingSlider palette={previewPalette} label="行距" value={value.lineHeight} minimum={1.4} maximum={2.4} step={0.1} format={(next) => next.toFixed(1)} onChange={(lineHeight) => onChange({ ...value, lineHeight })} />
-          <SpacingSlider palette={previewPalette} label="段间距" value={value.paragraphSpacing} minimum={0} maximum={24} step={2} format={(next) => String(Math.round(next))} onChange={(paragraphSpacing) => onChange({ ...value, paragraphSpacing })} />
+          <SpacingSlider palette={previewPalette} label="行距" value={value.lineHeight} minimum={1} maximum={3} step={0.1} format={(next) => next.toFixed(1)} onChange={(lineHeight) => onChange({ ...value, lineHeight })} />
+          <SpacingSlider palette={previewPalette} label="段间距" value={value.paragraphSpacing} minimum={0} maximum={64} step={2} format={(next) => String(Math.round(next))} onChange={(paragraphSpacing) => onChange({ ...value, paragraphSpacing })} />
         </View>
 
         <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>页面边距</Text>
@@ -1080,9 +1093,9 @@ function MarginSlider({ palette, icon, label, value, onChange }: { palette: Read
     <Slider
       accessibilityLabel={`${label}距`}
       style={styles.marginSlider}
-      minimumValue={8}
-      maximumValue={56}
-      step={4}
+      minimumValue={0}
+      maximumValue={96}
+      step={2}
       value={draft}
       onValueChange={setDraft}
       onSlidingComplete={(next) => onChange(Math.round(next))}
@@ -1368,9 +1381,9 @@ const styles = StyleSheet.create({
   sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 34, marginBottom: 18 },
   sectionTitle: { color: C.white, fontSize: 19, letterSpacing: 2, fontFamily: Platform.select({ android: 'serif', ios: 'Songti SC' }) },
   sectionCount: { color: '#789092', fontSize: 10 },
-  bookGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+  bookGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'flex-start' },
   bookTileWrap: { width: '46%', marginBottom: 28 },
-  bookTile: { width: '100%', aspectRatio: 0.71, backgroundColor: '#35565A', elevation: 4, shadowColor: '#071315', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
+  bookTile: { width: '100%', aspectRatio: BOOK_COVER_ASPECT_RATIO, backgroundColor: '#35565A', elevation: 4, shadowColor: '#071315', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
   coverImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   coverFallback: { flex: 1, padding: 16, overflow: 'hidden' },
   coverLine: { height: 1, width: 28, backgroundColor: 'rgba(255,255,255,.65)', marginTop: 5, marginBottom: 20 },
@@ -1382,7 +1395,8 @@ const styles = StyleSheet.create({
   bookOpening: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(10,31,35,.45)', alignItems: 'center', justifyContent: 'center' },
   tileTitle: { color: C.white, fontSize: 13, fontWeight: '600', marginTop: 10 },
   tileAuthor: { color: '#7F9698', fontSize: 10, marginTop: 4 },
-  addTile: { width: '46%', aspectRatio: 0.71, borderWidth: 1, borderStyle: 'dashed', borderColor: '#466065', alignItems: 'center', justifyContent: 'center', marginBottom: 28 },
+  addTileWrap: { width: '46%', marginBottom: 28 },
+  addTile: { width: '100%', aspectRatio: BOOK_COVER_ASPECT_RATIO, borderWidth: 1, borderStyle: 'dashed', borderColor: '#466065', alignItems: 'center', justifyContent: 'center' },
   addText: { color: C.seaPale, marginTop: 10, fontSize: 12, fontWeight: '600' },
   addHint: { color: '#687E80', fontSize: 9, marginTop: 5 },
   reader: { flex: 1 },
@@ -1471,19 +1485,12 @@ const styles = StyleSheet.create({
   typeSheet: { height: '82%', maxHeight: '82%', paddingBottom: 0 },
   typeScroll: { paddingBottom: 34 },
   controlLabel: { color: C.muted, fontSize: 11, marginTop: 15, marginBottom: 8 },
-  sizeControl: { flexDirection: 'row', alignItems: 'center' },
-  sizeButton: { width: 42, height: 42, borderWidth: 1, borderColor: C.line, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: C.white },
-  sizeButtonPressed: { backgroundColor: '#DDE9E5', borderColor: C.sea },
-  sizeTrackTouch: { flex: 1, height: 42, justifyContent: 'center', marginHorizontal: 12 },
-  sizeTrack: { width: '100%', height: 2, backgroundColor: C.line, position: 'relative' },
-  sizeFill: { height: 2, backgroundColor: C.sea },
-  sizeThumb: { position: 'absolute', top: -6, marginLeft: -7, width: 14, height: 14, borderRadius: 7, backgroundColor: C.sea },
-  sizeValue: { textAlign: 'center', color: C.muted, fontSize: 10 },
   typePreview: { minHeight: 86, marginTop: 14, paddingHorizontal: 15, paddingVertical: 10, justifyContent: 'center' },
   typePreviewText: { color: C.text, fontFamily: Platform.select({ android: 'serif', ios: 'Songti SC' }), textAlign: 'center' },
   layoutPairRow: { flexDirection: 'row', gap: 10 },
   layoutPairGroup: { flex: 1, minWidth: 0 },
   layoutPairLabel: { marginTop: 0 },
+  fontSizeSliderRow: { flexDirection: 'row', marginTop: 15 },
   optionRow: { flexDirection: 'row', gap: 7 },
   inlineSettingRow: { minHeight: 58, marginTop: 15, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   inlineSettingCopy: { flex: 1, paddingRight: 12 },

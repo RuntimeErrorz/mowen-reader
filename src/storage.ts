@@ -72,18 +72,18 @@ function imageDimensions(base64: string) {
 }
 
 export const defaultPrefs: ReaderPrefs = {
-  readingMode: 'scroll',
-  fontSize: 19,
-  lineHeight: 1.9,
-  theme: 'paper',
-  fontStyle: 'serif',
-  pagePadding: 26,
-  pagePaddingTop: 20,
-  pagePaddingBottom: 22,
-  pagePaddingLeft: 26,
-  pagePaddingRight: 26,
-  paragraphSpacing: 10,
-  firstLineIndent: true,
+  readingMode: 'paged',
+  fontSize: 24,
+  lineHeight: 1.4,
+  theme: 'wheat',
+  fontStyle: 'sans',
+  pagePadding: 24,
+  pagePaddingTop: 8,
+  pagePaddingBottom: 36,
+  pagePaddingLeft: 24,
+  pagePaddingRight: 24,
+  paragraphSpacing: 24,
+  firstLineIndent: false,
   textAlign: 'justify',
 };
 export const defaultAI: AISettings = {
@@ -95,6 +95,23 @@ export const defaultAI: AISettings = {
 async function ensureBookDir() {
   const info = await FileSystem.getInfoAsync(BOOK_DIR);
   if (!info.exists) await FileSystem.makeDirectoryAsync(BOOK_DIR, { intermediates: true });
+}
+
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 export async function loadLibrary(): Promise<BookSummary[]> {
@@ -126,9 +143,7 @@ export async function saveBook(book: Book): Promise<Book> {
       epubUri = persistedEpub;
     }
   }
-  const chapters = [] as Book['chapters'];
-  for (let chapterIndex = 0; chapterIndex < book.chapters.length; chapterIndex++) {
-    const chapter = book.chapters[chapterIndex];
+  const chapters = await mapConcurrent(book.chapters, 4, async (chapter, chapterIndex) => {
     const paragraphs: string[] = [];
     for (let paragraphIndex = 0; paragraphIndex < chapter.paragraphs.length; paragraphIndex++) {
       const paragraph = chapter.paragraphs[paragraphIndex];
@@ -151,9 +166,9 @@ export async function saveBook(book: Book): Promise<Book> {
       paragraphs.push(`[[MOWEN_IMAGE_FILE:${path}${dimensions ? `|${dimensions.width}|${dimensions.height}` : ''}]]`);
     }
     const normalizedChapter = { ...chapter, paragraphs };
-    chapters.push(normalizedChapter);
     await FileSystem.writeAsStringAsync(`${chaptersDir}${chapterIndex}.json`, JSON.stringify(normalizedChapter));
-  }
+    return normalizedChapter;
+  });
   let cover = book.cover;
   const parsedCover = dataImage(cover);
   if (parsedCover) {

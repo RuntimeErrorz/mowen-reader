@@ -20,11 +20,11 @@ const chunks = [];
 for (let offset = 0; offset < base64.length; offset += 256 * 1024) chunks.push(base64.slice(offset, offset + 256 * 1024));
 const config = {
   prefs: {
-    readingMode: 'paged', fontSize: 19, lineHeight: 1.8, theme: 'paper', fontStyle: 'serif',
-    pagePadding: 24, pagePaddingTop: 20, pagePaddingRight: 24, pagePaddingBottom: 22, pagePaddingLeft: 24,
-    paragraphSpacing: 10, firstLineIndent: true, textAlign: 'justify',
+    readingMode: 'paged', fontSize: 24, lineHeight: 1.4, theme: 'wheat', fontStyle: 'sans',
+    pagePadding: 24, pagePaddingTop: 8, pagePaddingRight: 24, pagePaddingBottom: 36, pagePaddingLeft: 24,
+    paragraphSpacing: 24, firstLineIndent: false, textAlign: 'justify',
   },
-  palette: { bg: '#f5edd8', text: '#211b14', muted: '#7b6b58', line: '#d8c9aa', accent: '#9f5f35', focus: '#ead5ab' },
+  palette: { bg: '#F0DEB7', text: '#211A12', muted: '#776851', line: '#D3BA8D', accent: '#A95D2D', focus: '#E5C994' },
 };
 const directory = await mkdtemp(join(tmpdir(), 'mowen-foliate-smoke-'));
 const testPath = join(directory, 'index.html');
@@ -48,9 +48,9 @@ const browser = spawn(browserPath, [
 ], { stdio: 'ignore' });
 let socket;
 try {
-  const deadline = Date.now() + 45_000;
+  const browserDeadline = Date.now() + 45_000;
   let target;
-  while (Date.now() < deadline) {
+  while (Date.now() < browserDeadline) {
     try {
       const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
       target = pages.find(page => page.type === 'page' && page.url.startsWith('file:'));
@@ -84,6 +84,12 @@ try {
     socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }));
   });
 
+  await evaluate(`document.readyState==='complete'||new Promise(resolve=>globalThis.addEventListener('load',resolve,{once:true}))`);
+  const shellReady = await evaluate(`!!document.getElementById('reader-shell')&&!!document.getElementById('note-close')`);
+  if (!shellReady) {
+    const pageState = await evaluate(`JSON.stringify({url:location.href,ready:document.readyState,body:document.body?.innerHTML?.slice(0,300)})`);
+    throw new Error(`Smoke page did not load the reader shell: ${pageState}`);
+  }
   await evaluate(`globalThis.ReactNativeWebView={postMessage(raw){const message=JSON.parse(raw);document.documentElement.dataset.lastMessage=message.type;if(message.type==='book-ready')document.documentElement.dataset.foliate='ready';if(message.type==='relocate')document.documentElement.dataset.relocate=String(message.position)+'/'+String(message.totalPositions);if(message.type==='error')document.documentElement.dataset.error=message.message;}};true;`);
   await evaluate(bundle, 15_000);
   await evaluate(bridge, 15_000);
@@ -91,7 +97,8 @@ try {
   await evaluate(`globalThis.__MOWEN__.open(${JSON.stringify({ name: 'smoke.epub', initialProgress: 0, config })})`, 45_000);
 
   let state = {};
-  while (Date.now() < deadline) {
+  const readyDeadline = Date.now() + 45_000;
+  while (Date.now() < readyDeadline) {
     const value = await evaluate('JSON.stringify({...document.documentElement.dataset})');
     state = value ? JSON.parse(value) : {};
     if (state.error || state.foliate === 'ready' && state.relocate) break;
@@ -99,6 +106,27 @@ try {
   }
   if (state.error || state.foliate !== 'ready' || !state.relocate) {
     throw new Error(state.error || `Foliate did not become ready (last message: ${state.lastMessage || 'none'})`);
+  }
+  let pagerState = {};
+  const pagerDeadline = Date.now() + 15_000;
+  while (Date.now() < pagerDeadline) {
+    pagerState = JSON.parse(await evaluate(`JSON.stringify(globalThis.__MOWEN__.pagerStatus())`));
+    if (pagerState.nextReady) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!pagerState.nextReady) throw new Error('Foliate next-page preview did not become ready');
+  const previousLocation = state.relocate;
+  const previousCfi = pagerState.currentCfi;
+  await evaluate(`globalThis.__MOWEN__.next();true`);
+  const turnDeadline = Date.now() + 15_000;
+  while (Date.now() < turnDeadline) {
+    const value = await evaluate(`JSON.stringify({...document.documentElement.dataset,pager:globalThis.__MOWEN__.pagerStatus()})`);
+    state = value ? JSON.parse(value) : {};
+    if (state.error || state.pager?.currentCfi && state.pager.currentCfi !== previousCfi && !state.pager?.turning) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (state.error || state.pager?.currentCfi === previousCfi || state.pager?.turning) {
+    throw new Error(state.error || `Foliate composited page turn did not settle: ${JSON.stringify({ previousLocation, previousCfi, state })}`);
   }
   const footnote = await evaluate(`(async()=>{const view=document.querySelector('foliate-view');for(let index=0;index<view.book.sections.length;index++){const source=await view.book.sections[index].createDocument?.();if(!source?.querySelector('a[href] sup'))continue;await view.goTo(index);const live=view.renderer.getContents()[0]?.doc;const link=live?.querySelector('a[href] sup')?.closest('a[href]');if(!link)return 'missing-live-link';link.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:live.defaultView}));return 'clicked';}return 'none';})()`, 30_000);
   if (footnote === 'clicked') {
@@ -111,11 +139,15 @@ try {
     }
     if (!noteOpen) throw new Error('Foliate found a footnote link but did not render its content');
   } else if (footnote !== 'none') throw new Error(`Foliate footnote test failed: ${footnote}`);
-  console.log(`Foliate smoke test passed: location ${state.relocate}, footnote ${footnote === 'clicked' ? 'rendered' : 'not present'}`);
+  console.log(`Foliate smoke test passed: page-turn CFI advanced at ${state.relocate}, footnote ${footnote === 'clicked' ? 'rendered' : 'not present'}`);
 } finally {
   socket?.close();
   const exited = new Promise(resolve => browser.once('exit', resolve));
   browser.kill();
   await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 3000))]);
-  await rm(directory, { recursive: true, force: true });
+  try {
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  } catch (error) {
+    console.warn(`Smoke test passed but could not remove temporary browser profile: ${error.message}`);
+  }
 }
