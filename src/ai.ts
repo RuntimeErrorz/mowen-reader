@@ -32,6 +32,154 @@ async function resolveImageBlock(text: string) {
   }
 }
 
+function extractDeltaContent(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value.map((part) => {
+    if (!part || typeof part !== 'object') return '';
+    const text = (part as { text?: unknown }).text;
+    return typeof text === 'string' ? text : '';
+  }).join('');
+}
+
+async function readStreamingResponse(response: Response, onDelta?: (delta: string) => void) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    console.log('[墨问AI] response.body unavailable; falling back to full-body parsing');
+    return null;
+  }
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let raw = '';
+  let mode: 'sse' | 'json' | null = null;
+  let content = '';
+  const consumeLine = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
+      const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
+      if (delta) { content += delta; onDelta?.(delta); }
+    } catch {
+      console.warn('[墨问AI] failed to parse one SSE frame', { firstChar: data[0] ?? '', length: data.length });
+    }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    raw += chunk;
+    if (!mode) {
+      const start = raw.trimStart();
+      if (start.startsWith('data:')) {
+        mode = 'sse';
+        console.log('[墨问AI] response mode: SSE');
+      } else if (start.startsWith('{') || start.startsWith('[')) {
+        mode = 'json';
+        console.log('[墨问AI] response mode: JSON');
+      }
+    }
+    if (mode === 'sse') {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      lines.forEach(consumeLine);
+    }
+  }
+  const tail = decoder.decode();
+  raw += tail;
+  if (mode === 'sse') {
+    buffer += tail;
+    consumeLine(buffer);
+    return content.trim();
+  }
+  if (mode === 'json') {
+    const data = JSON.parse(raw) as { choices?: Array<{ message?: { content?: unknown } }> };
+    return extractDeltaContent(data.choices?.[0]?.message?.content).trim();
+  }
+  return null;
+}
+
+function createSseParser(onDelta?: (delta: string) => void) {
+  let buffer = '';
+  let content = '';
+  let frameCount = 0;
+  const consumeLine = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
+      const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
+      if (delta) { content += delta; frameCount++; onDelta?.(delta); }
+    } catch {
+      console.warn('[墨问AI] failed to parse XHR SSE frame', { firstChar: data[0] ?? '', length: data.length });
+    }
+  };
+  return {
+    feed(chunk: string) {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      lines.forEach(consumeLine);
+    },
+    finish() {
+      consumeLine(buffer);
+      console.log('[墨问AI] XHR SSE complete', { frames: frameCount, contentLength: content.length });
+      return content.trim();
+    },
+  };
+}
+
+function requestWithXhr(url: string, apiKey: string, requestBody: Record<string, unknown>, signal: AbortSignal | undefined, onDelta?: (delta: string) => void): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const parser = createSseParser(onDelta);
+    let processedLength = 0;
+    let settled = false;
+    const abortError = () => {
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      return error;
+    };
+    const cleanup = () => signal?.removeEventListener('abort', handleAbort);
+    const handleAbort = () => { xhr.abort(); if (!settled) { settled = true; cleanup(); reject(abortError()); } };
+    const fail = (error: Error) => { if (!settled) { settled = true; cleanup(); reject(error); } };
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
+    xhr.onprogress = () => {
+      const next = xhr.responseText.slice(processedLength);
+      processedLength = xhr.responseText.length;
+      if (next) parser.feed(next);
+    };
+    xhr.onerror = () => fail(new Error('模型接口网络请求失败'));
+    xhr.onabort = () => { if (!settled) fail(abortError()); };
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        fail(new Error(`模型接口返回 ${xhr.status}`));
+        return;
+      }
+      const rest = xhr.responseText.slice(processedLength);
+      if (rest) parser.feed(rest);
+      const streamed = parser.finish();
+      if (streamed) {
+        settled = true; cleanup(); resolve(streamed); return;
+      }
+      try {
+        const data = JSON.parse(xhr.responseText) as { choices?: Array<{ message?: { content?: unknown } }> };
+        const content = extractDeltaContent(data.choices?.[0]?.message?.content).trim();
+        if (!content) throw new Error('模型没有返回可显示的内容');
+        settled = true; cleanup(); resolve(content);
+      } catch (error) { fail(error instanceof Error ? error : new Error('模型返回内容无法解析')); }
+    };
+    signal?.addEventListener('abort', handleAbort, { once: true });
+    console.log('[墨问AI] using XHR progress streaming');
+    xhr.send(JSON.stringify(requestBody));
+  });
+}
+
 export async function askAI(options: {
   settings: AISettings;
   bookTitle: string;
@@ -46,8 +194,9 @@ export async function askAI(options: {
   additionalImages?: string[];
   history?: AIMessage[];
   signal?: AbortSignal;
-}) {
-  const { settings, bookTitle, bookAuthor, bookDescription, chapter, paragraphIndex, intent, question, signal } = options;
+  onDelta?: (delta: string) => void;
+}): Promise<string> {
+  const { settings, bookTitle, bookAuthor, bookDescription, chapter, paragraphIndex, intent, question, signal, onDelta } = options;
   const radius = Math.max(1, Math.min(20, options.contextRadius ?? 5));
   const start = Math.max(0, paragraphIndex - radius);
   const end = Math.min(chapter.paragraphs.length, paragraphIndex + radius + 1);
@@ -82,12 +231,24 @@ export async function askAI(options: {
       ]
     : prompt;
   const baseUrl = settings.baseUrl.replace(/\/$/, '');
+  const requestBody: Record<string, unknown> = {
+    model: settings.model,
+    temperature: 0.35,
+    stream: true,
+    messages: [
+      { role: 'system', content: 'You are an EPUB reading assistant. Answer using the provided book context.' },
+      ...(options.history ?? []),
+      { role: 'user', content: userContent },
+    ],
+  };
+  return requestWithXhr(`${baseUrl}/chat/completions`, settings.apiKey, requestBody, signal, onDelta);
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
     body: JSON.stringify({
       model: settings.model,
       temperature: 0.35,
+      stream: true,
       messages: [
         {
           role: 'system',
@@ -102,12 +263,41 @@ export async function askAI(options: {
     }),
     signal,
   });
+  console.log('[墨问AI] response received', {
+    status: response.status,
+    contentType: response.headers.get('content-type') ?? '',
+    hasBody: !!response.body,
+  });
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`模型接口返回 ${response.status}${body ? `：${body.slice(0, 120)}` : ''}`);
   }
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const streamed = await readStreamingResponse(response, onDelta);
+  if (streamed !== null) {
+    if (!streamed) throw new Error('妯″瀷娌℃湁杩斿洖鍙樉绀虹殑鍐呭');
+    return streamed as string;
+  }
+  const body = await response.text();
+  const bodyStart = body.trimStart();
+  console.log('[墨问AI] full-body fallback', { length: body.length, startsWithData: bodyStart.startsWith('data:') });
+  if (bodyStart.startsWith('data:')) {
+    let content = '';
+    for (const line of body.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
+        const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
+        if (delta) { content += delta; onDelta?.(delta); }
+      } catch {
+        console.warn('[墨问AI] failed to parse fallback SSE frame', { firstChar: data[0] ?? '', length: data.length });
+      }
+    }
+    if (content.trim()) return content.trim();
+  }
+  const data = JSON.parse(body) as { choices?: Array<{ message?: { content?: unknown } }> };
+  const content = extractDeltaContent(data.choices?.[0]?.message?.content);
   if (!content) throw new Error('模型没有返回可显示的内容');
-  return String(content).trim();
+  return content.trim();
 }

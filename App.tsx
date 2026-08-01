@@ -505,14 +505,6 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     const link = toc.find((item) => item.label.replace(/\s+/g, ' ').trim() === title) ?? toc[index];
     if (link?.href) readerRef.current?.goTo(link.href);
   };
-  const beginBookmarkSelection = () => {
-    setBookmarksOpen(false);
-    setBookmarkSelection(null);
-    setBookmarkSelecting(true);
-    setChromeVisible(false);
-    chromeAnim.setValue(0);
-    readerRef.current?.beginBookmarkSelection();
-  };
   const cancelBookmarkSelection = () => {
     readerRef.current?.endBookmarkSelection();
     setBookmarkSelecting(false);
@@ -537,17 +529,27 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
       locations: { progression: location?.sectionProgression ?? 0, position: location?.position, totalProgression: location?.progression },
       text: { highlight: excerpt },
     };
-    props.onBookmarksChange([...props.bookmarks, {
+    const nextBookmarks = [...props.bookmarks, {
       id: `bookmark-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       bookId: props.book.id,
       chapterIndex: nextChapter,
       paragraphIndex: nextParagraph,
+      sectionIndex: bookmarkSelection.sectionIndex,
       chapterTitle: selectedChapter.title,
       excerpt,
       locator: bookmarkLocator,
       createdAt: Date.now(),
-    }]);
+    }];
+    console.log('[MOWEN_BOOKMARK] add count=' + nextBookmarks.length);
+    readerRef.current?.setBookmarks(nextBookmarks);
+    props.onBookmarksChange(nextBookmarks);
     cancelBookmarkSelection();
+  };
+  const deleteBookmark = (bookmark: Bookmark) => {
+    const nextBookmarks = props.bookmarks.filter((item) => item.id !== bookmark.id);
+    console.log('[MOWEN_BOOKMARK] delete count=' + nextBookmarks.length);
+    readerRef.current?.setBookmarks(nextBookmarks);
+    props.onBookmarksChange(nextBookmarks);
   };
   const openConversation = (conversation: AIConversation) => {
     if (conversation.locator?.type === 'application/epub+cfi' && conversation.locator.href) {
@@ -599,6 +601,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         ref={readerRef}
         epubUri={props.epubUri}
         title={props.book.title}
+        bookmarks={props.bookmarks}
         prefs={props.prefs}
         palette={palette}
         initialCfi={initialCfi.current}
@@ -678,9 +681,8 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         bookmarks={props.bookmarks}
         chapterTitle={chapter.title}
         paragraphIndex={paragraphIndex}
-        onStartSelection={beginBookmarkSelection}
         onChoose={(bookmark) => { setBookmarksOpen(false); if (bookmark.locator?.type === 'application/epub+cfi') readerRef.current?.goTo(bookmark.locator.href); else goToChapter(bookmark.chapterIndex); }}
-        onDelete={(bookmark) => props.onBookmarksChange(props.bookmarks.filter((item) => item.id !== bookmark.id))}
+        onDelete={deleteBookmark}
         conversations={props.conversations}
         onChooseConversation={openConversation}
         onDeleteConversation={props.onConversationDelete}
@@ -744,7 +746,6 @@ function BookmarksModal(props: {
   bookmarks: Bookmark[];
   chapterTitle: string;
   paragraphIndex: number;
-  onStartSelection: () => void;
   onChoose: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
   conversations: AIConversation[];
@@ -767,10 +768,6 @@ function BookmarksModal(props: {
           <Pressable onPress={() => setTab('conversations')} style={[styles.marginTab, tab === 'conversations' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'conversations' ? props.palette.accent : props.palette.muted }, tab === 'conversations' && styles.marginTabTextActive]}>AI 对话 {props.conversations.length}</Text></Pressable>
         </View>
         {tab === 'bookmarks' ? <>
-        <Pressable onPress={props.onStartSelection} style={[styles.currentBookmarkAction, { backgroundColor: props.palette.focus, borderColor: props.palette.line }]}>
-          <View style={[styles.bookmarkActionIcon, { backgroundColor: props.palette.control }]}><Ionicons name="text-outline" size={19} color={props.palette.accent} /></View>
-          <View style={{ flex: 1 }}><Text style={[styles.currentBookmarkTitle, { color: props.palette.text }]}>摘录文字</Text><Text numberOfLines={1} style={[styles.currentBookmarkMeta, { color: props.palette.muted }]}>按住选区手柄，另一指左右滑动翻页</Text></View>
-        </Pressable>
         <FlatList
           data={ordered}
           keyExtractor={(item) => item.id}
@@ -1164,31 +1161,35 @@ function AIPanel(props: {
   }, [props.visible, props.paragraphIndex]);
   const run = async (intent: AIIntent) => {
     if (!props.settings.apiKey.trim()) { setError('先配置模型接口，墨问才知道该去哪里思考。'); return; }
+    const text = question.trim();
+    setQuestion('');
     setLoading(true); setError(''); setAnswer('');
     controller.current?.abort();
     controller.current = new AbortController();
     try {
       const priorMessages = messagesRef.current;
+      const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text }];
+      setConversationMessages(pendingMessages);
       const result = await askAI({
         ...props,
         intent,
-        question: question.trim(),
+        question: text,
         contextRadius,
         additionalImages: props.selectedImage ? [props.selectedImage] : undefined,
         history: priorMessages,
         signal: controller.current.signal,
+        onDelta: (delta) => setAnswer((current) => current + delta),
       });
       const userLabel: Record<AIIntent, string> = {
         explain: '解释这段',
         thread: '联系上下文',
         simple: '说简单点',
-        question: question.trim(),
+        question: text,
       };
-      const nextMessages: AIMessage[] = [...priorMessages, { role: 'user', content: userLabel[intent] }, { role: 'assistant', content: result }];
+      const nextMessages: AIMessage[] = [...pendingMessages.slice(0, -1), { role: 'user', content: userLabel[intent] }, { role: 'assistant', content: result }];
       messagesRef.current = nextMessages;
       setConversationMessages(nextMessages);
-      setAnswer(result);
-      setQuestion('');
+      setAnswer('');
       const rawExcerpt = props.selectedImage ? '〔插图〕' : props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
       props.onSaveConversation({
         id: sessionId.current,
@@ -1232,7 +1233,7 @@ function AIPanel(props: {
     return values.filter((value, index, all) => all.indexOf(value) === index);
   }, [end, props.chapter.paragraphs, props.paragraphIndex, props.selectedImage, start]);
   const bookImageCount = contextImageUris.length;
-  const hasConversationContent = loading || !!answer;
+  const hasConversationContent = loading || conversationMessages.length > 0;
   if (!props.visible) return null;
 
   return (
@@ -1287,8 +1288,22 @@ function AIPanel(props: {
                 <IntentButton palette={props.palette} title="说简单点" onPress={() => fillPreset('请用更直白的中文改写这段内容，并举一个贴切的小例子。')} />
               </View>
             )}
+            {conversationMessages.map((message, index) => message.role === 'user' ? (
+              <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, { backgroundColor: props.palette.focus }]}>
+                <Text style={[styles.historyQuestionLabel, { color: props.palette.accent }]}>你问</Text>
+                <Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
+              </View>
+            ) : (
+              <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
+                <Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text>
+                <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
+              </View>
+            ))}
+            {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
+              <Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text>
+              <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
+            </View>}
             {loading && <View style={styles.thinking}><View style={[styles.thinkingOrb, { backgroundColor: props.palette.accent }]}><ActivityIndicator color={props.palette.onAccent} /></View><View><Text style={[styles.thinkingTitle, { color: props.palette.text }]}>沿着上下文阅读…</Text><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>只发送当前段落附近的内容</Text></View></View>}
-            {!!answer && <View style={[styles.answerCard, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}><Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text><Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown><Pressable onPress={() => { setAnswer(''); setQuestion(''); }} style={styles.askAgain}><Ionicons name="refresh" size={15} color={props.palette.accent} /><Text style={[styles.askAgainText, { color: props.palette.accent }]}>换一种问法</Text></Pressable></View>}
             {!!error && <View style={[styles.errorCard, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="information-circle-outline" size={19} color={C.ember} /><Text style={[styles.errorText, { color: props.palette.text }]}>{error}</Text>{!props.settings.apiKey && <Pressable onPress={props.onSettings}><Text style={[styles.errorLink, { color: props.palette.accent }]}>去配置</Text></Pressable>}</View>}
           </ScrollView>
           <View style={[styles.aiComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
@@ -1506,21 +1521,16 @@ const styles = StyleSheet.create({
   marginTabActive: { borderBottomColor: C.sea },
   marginTabText: { color: C.muted, fontSize: 11 },
   marginTabTextActive: { fontWeight: '800' },
-  currentBookmarkAction: { minHeight: 68, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#E4ECE8', borderWidth: 1, borderColor: '#C8D9D2', paddingHorizontal: 13, marginTop: 4, marginBottom: 12 },
-  currentBookmarkActionRemove: { backgroundColor: '#F1E7DF', borderColor: '#E3CDBF' },
-  bookmarkActionIcon: { width: 38, height: 42, borderTopLeftRadius: 19, borderTopRightRadius: 5, borderBottomRightRadius: 19, borderBottomLeftRadius: 5, backgroundColor: '#F4F7F3', alignItems: 'center', justifyContent: 'center' },
   bookmarkSelectionActions: { position: 'absolute', alignSelf: 'center', bottom: 10, flexDirection: 'row', gap: 8 },
   bookmarkSelectionButton: { minWidth: 52, height: 44, borderWidth: 1, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 12, elevation: 8 },
   bookmarkSelectionButtonText: { fontSize: 11, fontWeight: '800' },
   bookmarkActionIconRemove: { backgroundColor: '#F8F1EB' },
-  currentBookmarkTitle: { color: C.text, fontSize: 13, fontWeight: '800' },
-  currentBookmarkMeta: { color: C.muted, fontSize: 10, marginTop: 4 },
   bookmarksList: { paddingBottom: 28 },
   bookmarksEmptyList: { flexGrow: 1 },
   bookmarksEmpty: { flex: 1, minHeight: 260, alignItems: 'center', justifyContent: 'center' },
   bookmarksEmptyTitle: { color: C.text, fontSize: 14, fontWeight: '700', marginTop: 10 },
   bookmarksEmptyText: { color: C.muted, fontSize: 10, marginTop: 5 },
-  bookmarkItem: { minHeight: 118, flexDirection: 'row', paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+  bookmarkItem: { flexDirection: 'row', paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
   bookmarkRail: { width: 18, alignItems: 'center', paddingTop: 5 },
   bookmarkDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.sea },
   bookmarkLine: { width: 1, flex: 1, backgroundColor: '#D5DDD7', marginTop: 5 },

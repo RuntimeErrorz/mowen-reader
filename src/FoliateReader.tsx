@@ -3,7 +3,7 @@ import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, u
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { FOLIATE_BUNDLE } from './generated/foliateBundle';
-import { ReaderPrefs } from './types';
+import { Bookmark, ReaderPrefs } from './types';
 
 export type FoliatePalette = {
   bg: string;
@@ -54,11 +54,13 @@ export type FoliateReaderHandle = {
   back: () => void;
   beginBookmarkSelection: () => void;
   endBookmarkSelection: () => void;
+  setBookmarks: (bookmarks: Bookmark[]) => void;
 };
 
 type Props = {
   epubUri: string;
   title: string;
+  bookmarks: Bookmark[];
   prefs: ReaderPrefs;
   palette: FoliatePalette;
   initialCfi?: string;
@@ -76,6 +78,7 @@ type Props = {
 type HostMessage =
   | { type: 'host-ready' }
   | { type: 'book-ready'; toc: FoliateTOCItem[] }
+  | { type: 'debug'; message: string }
   | ({ type: 'relocate' } & FoliateLocation)
   | { type: 'center-tap' }
   | ({ type: 'long-press' } & FoliateLongPress)
@@ -129,6 +132,7 @@ foliate-view::part(head),foliate-view::part(foot){display:none}
 const FOLIATE_BRIDGE = String.raw`
 (() => {
   const send = value => globalThis.ReactNativeWebView?.postMessage(JSON.stringify(value));
+  const debug = message => send({ type: 'debug', message: '[MOWEN_BOOKMARK] ' + String(message) });
   const state = {
     chunks: [],
     config: null,
@@ -155,6 +159,7 @@ const FOLIATE_BRIDGE = String.raw`
     bookmarkHeldHandle: null,
     bookmarkOuterPageGesture: null,
     bookmarkPageDragOffset: 0,
+    bookmarkHighlightKeys: new Set(),
   };
   const labelOf = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.zh || value['zh-CN'] || value.en || Object.values(value)[0] || '') : '';
   const flattenTOC = (items, depth = 0, output = []) => {
@@ -548,6 +553,9 @@ const FOLIATE_BRIDGE = String.raw`
     for (const preview of state.previews ? [state.previews.previous, state.previews.next] : [])
       configureRenderer(preview.renderer, config);
     pager.cancel();
+    const contents = state.view?.renderer?.getContents?.() || [];
+    debug('configure contents=' + contents.length + ' bookmarks=' + (state.config?.bookmarks?.length || 0));
+    for (const { doc, index, overlayer } of contents) applyBookmarkHighlights(doc, index, overlayer);
     if (paged) {
       state.scrollIntentDir = 0;
       state.scrollIntentUntil = 0;
@@ -555,18 +563,131 @@ const FOLIATE_BRIDGE = String.raw`
       preparePreviews(state.currentCfi);
     } else disposePreviews();
   };
+  const applyBookmarks = bookmarks => {
+    const next = Array.isArray(bookmarks) ? bookmarks : [];
+    debug('configureBookmarks received count=' + next.length + ' config=' + (!!state.config) + ' view=' + (!!state.view));
+    if (!state.config) {
+      debug('configureBookmarks skipped: config is not ready');
+      return;
+    }
+    state.config = { ...state.config, bookmarks: next };
+    const contents = state.view?.renderer?.getContents?.() || [];
+    debug('configureBookmarks contents=' + contents.length);
+    for (const { doc, index, overlayer } of contents) applyBookmarkHighlights(doc, index, overlayer);
+  };
+  const bookmarkRange = (doc, needle) => {
+    const target = needle.replace(/\s+/g, ' ').trim();
+    if (!target) return null;
+    const nodes = [];
+    let raw = '';
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.parentElement?.closest('script,style,noscript')) continue;
+      nodes.push({ node, start: raw.length });
+      raw += node.nodeValue || '';
+    }
+    let normalized = '';
+    const map = [];
+    for (let offset = 0; offset < raw.length; offset++) {
+      if (/\s/.test(raw[offset])) {
+        if (normalized.endsWith(' ')) continue;
+        normalized += ' ';
+      } else normalized += raw[offset];
+      map.push(offset);
+    }
+    const start = normalized.indexOf(target);
+    if (start < 0) return null;
+    const end = start + target.length;
+    const locate = offset => {
+      const entry = nodes.findLast(item => item.start <= offset) || nodes[0];
+      return { node: entry.node, offset: Math.max(0, Math.min((entry.node.nodeValue || '').length, offset - entry.start)) };
+    };
+    const range = doc.createRange();
+    const startPoint = locate(map[start]);
+    const endPoint = locate(map[end - 1] + 1);
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    return range;
+  };
+  const drawBookmarkHighlight = rects => {
+    const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    group.setAttribute('fill', '#FFF86E');
+    group.setAttribute('opacity', '1');
+    group.style.mixBlendMode = 'multiply';
+    for (const rect of rects || []) {
+      if (!rect.width || !rect.height) continue;
+      const element = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      element.setAttribute('x', String(rect.left));
+      element.setAttribute('y', String(rect.top));
+      element.setAttribute('width', String(rect.width));
+      element.setAttribute('height', String(rect.height));
+      group.append(element);
+    }
+    return group;
+  };
+  const bookmarkOverlayer = doc => (state.view?.renderer?.getContents?.() || []).find(item => item.doc === doc)?.overlayer;
+  const applyBookmarkHighlights = (doc, index, overlayer = bookmarkOverlayer(doc)) => {
+    let cfiMatches = 0;
+    let excerptMatches = 0;
+    let overlayAdds = 0;
+    let overlayErrors = 0;
+    for (const key of state.bookmarkHighlightKeys) overlayer?.remove?.(key);
+    state.bookmarkHighlightKeys.clear();
+    const ranges = [];
+    for (const bookmark of state.config?.bookmarks || []) {
+      if (Number.isInteger(bookmark.sectionIndex) && bookmark.sectionIndex !== index) continue;
+      let range = null;
+      const cfi = bookmark.locator?.href;
+      if (cfi && typeof state.view?.resolveCFI === 'function') {
+        try {
+          const resolved = state.view.resolveCFI(cfi);
+          if (resolved?.index === index && typeof resolved.anchor === 'function') {
+            range = resolved.anchor(doc);
+            if (range?.collapsed || !range?.toString?.().trim()) range = null;
+            else cfiMatches++;
+          }
+        } catch {}
+      }
+      if (!range) {
+        const excerpt = bookmark.excerpt || bookmark.locator?.text?.highlight || '';
+        range = bookmarkRange(doc, excerpt);
+        if (range) excerptMatches++;
+      }
+      if (range && overlayer?.add) {
+        const key = 'mowen-bookmark:' + (bookmark.id || cfi || bookmark.excerpt);
+        try {
+          overlayer.add(key, range, drawBookmarkHighlight);
+          state.bookmarkHighlightKeys.add(key);
+          overlayAdds++;
+        } catch { overlayErrors++; }
+      } else if (range) ranges.push(range);
+    }
+    // Keep a CSS Highlight fallback for renderers without Foliate's overlay.
+    const css = doc.defaultView?.CSS;
+    if (!overlayer?.add && css?.highlights && typeof doc.defaultView?.Highlight === 'function') {
+      css.highlights.delete('mowen-bookmark');
+      if (ranges.length) css.highlights.set('mowen-bookmark', new doc.defaultView.Highlight(...ranges));
+    }
+    debug('apply index=' + index + ' bookmarks=' + (state.config?.bookmarks?.length || 0)
+      + ' overlayer=' + (!!overlayer?.add) + ' cfi=' + cfiMatches + ' excerpt=' + excerptMatches
+      + ' added=' + overlayAdds + ' errors=' + overlayErrors);
+  };
   const attachDocumentGestures = ({ doc, index }) => {
+    applyBookmarkHighlights(doc, index, bookmarkOverlayer(doc));
     let touch = null;
     let longPressTimer = 0;
     let suppressClickUntil = 0;
     let selectionTimer = 0;
     let bookmarkShortcut = false;
-    let bookmarkPageGesture = null;
     let bookmarkSelectionTouch = null;
     let bookmarkSelectionTimer = 0;
     const interactive = target => target?.closest?.('a[href],button,input,textarea,select,label');
     const longPressBlocked = target => target?.closest?.('button,input,textarea,select,label');
     const screenWidth = () => Math.max(1, doc.defaultView?.screen?.width || globalThis.screen?.width || state.view?.renderer?.size || 1);
+    const touchCoordinates = point => ({
+      x: Number.isFinite(point?.clientX) ? point.clientX : point?.screenX,
+      y: Number.isFinite(point?.clientY) ? point.clientY : point?.screenY,
+    });
     const clearLongPress = () => {
       if (longPressTimer) doc.defaultView?.clearTimeout(longPressTimer);
       longPressTimer = 0;
@@ -612,7 +733,7 @@ const FOLIATE_BRIDGE = String.raw`
       }
       return lastPoint;
     };
-    const caretPointAt = (visible, clientX, clientY, direction) => {
+    const caretPointAt = (visible, clientX, clientY, direction, allowOutsideVisible = false) => {
       try {
         const caret = doc.caretPositionFromPoint?.(clientX, clientY);
         const fallbackRange = !caret ? doc.caretRangeFromPoint?.(clientX, clientY) : null;
@@ -622,10 +743,10 @@ const FOLIATE_BRIDGE = String.raw`
           const point = doc.createRange();
           point.setStart(node, offset);
           point.collapse(true);
-          if (
+          if (allowOutsideVisible || (
             point.compareBoundaryPoints(Range.START_TO_START, visible) >= 0
             && point.compareBoundaryPoints(Range.END_TO_END, visible) <= 0
-          ) return { node, offset };
+          )) return { node, offset };
         }
       } catch {}
       return visibleTextEdge(visible, direction);
@@ -688,6 +809,11 @@ const FOLIATE_BRIDGE = String.raw`
     const rendererPageOffset = renderer => {
       const inlineSign = renderer.getAttribute?.('dir') === 'rtl' ? -1 : 1;
       const start = Number(renderer.start);
+      // In scrolled flow the document coordinates already start at the
+      // beginning of the section. Only paginated flow has the extra leading
+      // column, so applying the page offset there would shift vertical
+      // selection handles by one viewport.
+      if (renderer.scrolled) return Number.isFinite(start) ? start : 0;
       if (Number.isFinite(start)) return start - renderer.size * inlineSign;
       return Math.max(0, Number(renderer.page || 1) - 1) * renderer.size * inlineSign;
     };
@@ -715,6 +841,15 @@ const FOLIATE_BRIDGE = String.raw`
         return { clientX: rect.left + point.clientX - rendererPageOffset(renderer), clientY: rect.top + point.clientY, rect };
       return { clientX: rect.left + point.clientX, clientY: rect.top + point.clientY - rendererPageOffset(renderer), rect };
     };
+    const rememberBookmarkPageTouch = (gesture, point, fromInnerDocument) => {
+      if (!gesture || !point) return;
+      const viewport = fromInnerDocument
+        ? viewportPointFromContent({ clientX: point.clientX, clientY: point.clientY })
+        : point;
+      if (!viewport) return;
+      gesture.pageClientX = viewport.clientX;
+      gesture.pageClientY = viewport.clientY;
+    };
     const hideBookmarkHandle = () => {
       for (const handle of document.querySelectorAll('.bookmark-selection-handle'))
         handle.classList.remove('visible');
@@ -722,12 +857,21 @@ const FOLIATE_BRIDGE = String.raw`
     const placeBookmarkHandle = (handle, point, followsPage) => {
       const viewport = viewportPointFromContent(point);
       const renderer = state.view?.renderer;
+      const held = state.bookmarkHeldHandle?.source === 'custom'
+        && state.bookmarkHeldHandle.endpoint === handle?.dataset?.endpoint
+        ? state.bookmarkHeldHandle
+        : null;
       // renderer.getBoundingClientRect() already contains the current page
       // surface transform. Unheld handles therefore need no extra offset;
-      // only cancel that transform for the handle pinned under a finger.
+      // a held handle stays under its finger while the other finger moves the
+      // page, so use its live touch position instead of the content rect.
       const dragOffset = followsPage ? 0 : -state.bookmarkPageDragOffset;
-      const clientX = viewport?.clientX + (renderer?.scrollProp === 'scrollLeft' ? dragOffset : 0);
-      const clientY = viewport?.clientY + (renderer?.scrollProp === 'scrollLeft' ? 0 : dragOffset);
+      const clientX = held
+        ? held.clientX + (held.caretOffsetX || 0)
+        : viewport?.clientX + (renderer?.scrollProp === 'scrollLeft' ? dragOffset : 0);
+      const clientY = held
+        ? held.clientY + (held.caretOffsetY || 0)
+        : viewport?.clientY + (renderer?.scrollProp === 'scrollLeft' ? 0 : dragOffset);
       if (
         !viewport
         || clientX < viewport.rect.left - 12
@@ -818,19 +962,36 @@ const FOLIATE_BRIDGE = String.raw`
       globalThis.navigator?.vibrate?.(20);
       return true;
     };
-    const prepareBookmarkSelectionRestore = (direction, reportedHandlePoint) => {
+    const prepareBookmarkSelectionRestore = (direction, reportedHandlePoint, scrolledStartOverride, reportedPageViewportPoint) => {
       if (!state.bookmarkSelecting || state.bookmarkPageTurning) return null;
       const model = state.bookmarkSelectionModel?.doc === doc ? state.bookmarkSelectionModel : null;
       const selection = doc.getSelection?.();
       if (!model && (!selection?.rangeCount || selection.getRangeAt(0).collapsed)) return null;
       const renderer = state.view?.renderer;
-      if (!renderer || (direction < 0 ? renderer.page <= 1 : renderer.page >= renderer.pages - 2)) return null;
+      if (!renderer) return null;
+      if (renderer.scrolled) {
+        const atBoundary = direction < 0
+          ? renderer.start <= 2
+          : renderer.viewSize - renderer.end <= 2;
+        if (atBoundary) return null;
+      } else if (direction < 0 ? renderer.page <= 1 : renderer.page >= renderer.pages - 2) return null;
       const selectedRange = model ? bookmarkModelRange(model) : selection.getRangeAt(0).cloneRange();
       if (!selectedRange || selectedRange.collapsed) return null;
       const handles = selectionHandlePoints(selectedRange);
-      const validReportedPoint = Number.isFinite(reportedHandlePoint?.clientX) && Number.isFinite(reportedHandlePoint?.clientY)
-        ? reportedHandlePoint
+      const horizontal = renderer.scrollProp === 'scrollLeft';
+      // In scrolled flow the second finger's viewport position is the target
+      // for the moving endpoint. Paginated flow keeps the held-handle point
+      // for its page-local coordinate system.
+      const validReportedViewportPoint = renderer.scrolled
+        && Number.isFinite(reportedPageViewportPoint?.clientX) && Number.isFinite(reportedPageViewportPoint?.clientY)
+        ? reportedPageViewportPoint
         : null;
+      const validReportedPoint = !renderer.scrolled
+        && Number.isFinite(reportedHandlePoint?.clientX) && Number.isFinite(reportedHandlePoint?.clientY)
+        ? reportedHandlePoint
+        : validReportedViewportPoint
+          ? contentPointFromViewport(validReportedViewportPoint)
+          : null;
       const movingStart = model ? model.movingStart : validReportedPoint && handles
         ? Math.hypot(validReportedPoint.clientX - handles.start.clientX, validReportedPoint.clientY - handles.start.clientY)
           <= Math.hypot(validReportedPoint.clientX - handles.end.clientX, validReportedPoint.clientY - handles.end.clientY)
@@ -840,17 +1001,41 @@ const FOLIATE_BRIDGE = String.raw`
       const stationaryNode = model?.fixedNode || (movingStart ? selectedRange.endContainer : selectedRange.startContainer);
       const stationaryOffset = model?.fixedOffset ?? (movingStart ? selectedRange.endOffset : selectedRange.startOffset);
       if (!stationaryNode || stationaryNode.ownerDocument !== doc) return null;
-      const horizontal = renderer.scrollProp === 'scrollLeft';
       const inlineSign = renderer.getAttribute?.('dir') === 'rtl' ? -1 : 1;
+      const startBeforeTurn = Number.isFinite(scrolledStartOverride)
+        ? scrolledStartOverride
+        : Number(renderer.start);
       const pageDelta = direction * renderer.size * inlineSign;
       const targetHandlePoint = {
         clientX: handlePoint.clientX + (horizontal ? pageDelta : 0),
         clientY: handlePoint.clientY + (horizontal ? 0 : pageDelta),
       };
+      const targetIsCurrentViewportPoint = !!validReportedViewportPoint;
       return async visible => {
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (!renderer.scrolled)
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         if (!visible || visible.startContainer?.ownerDocument !== doc || !stationaryNode.isConnected) return;
-        const point = caretPointAt(visible, targetHandlePoint.clientX, targetHandlePoint.clientY, direction);
+        const actualDelta = renderer.scrolled && Number.isFinite(startBeforeTurn) && Number.isFinite(Number(renderer.start))
+          ? Number(renderer.start) - startBeforeTurn
+          : 0;
+        const currentViewportPoint = targetIsCurrentViewportPoint
+          ? contentPointFromViewport(reportedPageViewportPoint)
+          : null;
+        const point = caretPointAt(
+          visible,
+          currentViewportPoint
+            ? currentViewportPoint.clientX
+            : renderer.scrolled && horizontal
+              ? handlePoint.clientX + actualDelta * inlineSign
+              : targetHandlePoint.clientX,
+          currentViewportPoint
+            ? currentViewportPoint.clientY
+            : renderer.scrolled && !horizontal
+              ? handlePoint.clientY + actualDelta
+              : targetHandlePoint.clientY,
+          direction,
+          renderer.scrolled && targetIsCurrentViewportPoint,
+        );
         if (!point) return;
         state.bookmarkSelectionModel = {
           doc,
@@ -867,17 +1052,19 @@ const FOLIATE_BRIDGE = String.raw`
         // Android ends its native handle session when the paginator scrolls.
         // Re-assert the logical range after that stale native touch sequence
         // settles; from this point the in-reader handle owns further edits.
-        doc.defaultView?.setTimeout(() => {
-          if (state.bookmarkSelectionModel?.doc !== doc || state.bookmarkPageTurning) return;
-          if (!selectionMatchesBookmarkModel(doc.getSelection?.())) applyBookmarkSelectionModel();
-          renderBookmarkHandle();
-        }, 120);
+        if (!renderer.scrolled) {
+          doc.defaultView?.setTimeout(() => {
+            if (state.bookmarkSelectionModel?.doc !== doc || state.bookmarkPageTurning) return;
+            if (!selectionMatchesBookmarkModel(doc.getSelection?.())) applyBookmarkSelectionModel();
+            renderBookmarkHandle();
+          }, 120);
+        }
         doc.defaultView?.focus?.();
         globalThis.navigator?.vibrate?.(12);
       };
     };
-    const queueBookmarkSelectionRestore = (direction, handlePoint) => {
-      const run = prepareBookmarkSelectionRestore(direction, handlePoint);
+    const queueBookmarkSelectionRestore = (direction, handlePoint, scrolledStartOverride, pageViewportPoint) => {
+      const run = prepareBookmarkSelectionRestore(direction, handlePoint, scrolledStartOverride, pageViewportPoint);
       if (!run) return false;
       const restore = { run, timeout: 0 };
       restore.timeout = globalThis.setTimeout(() => {
@@ -888,15 +1075,158 @@ const FOLIATE_BRIDGE = String.raw`
       }, 1600);
       state.bookmarkSelectionRestore = restore;
       state.bookmarkPageTurning = true;
+      const renderer = state.view?.renderer;
+      if (renderer?.scrolled) {
+        state.bookmarkSelectionRestore = null;
+        Promise.resolve(restore.run(state.visibleRange)).finally(() => {
+          state.bookmarkPageTurning = false;
+          state.bookmarkHandleController?.render?.();
+        });
+      }
+      return true;
+    };
+    const scrollBookmarkPage = direction => {
+      const renderer = state.view?.renderer;
+      if (!renderer?.scrolled) return false;
+      const delta = direction * renderer.size;
+      // Use Foliate's public navigation methods instead of Paginator.scrollBy.
+      // scrollBy clamps against a private bounds snapshot which can be stale
+      // after continuous layout/section changes.
+      const navigate = delta >= 0 ? renderer.next?.(delta) : renderer.prev?.(-delta);
+      Promise.resolve(navigate).catch(() => {});
       return true;
     };
     const turnBookmarkSelectionPage = (direction, handlePoint) => {
-      if (!queueBookmarkSelectionRestore(direction, handlePoint)) return false;
+      // Selection restoration is best effort. It must not veto the page turn:
+      // when Android has already dropped the native selection range, the
+      // previous behavior made both vertical and horizontal swipes snap back.
+      queueBookmarkSelectionRestore(direction, handlePoint);
+      if (state.view?.renderer?.scrolled) return scrollBookmarkPage(direction);
       if (pager.turn(direction)) return true;
       if (state.bookmarkSelectionRestore?.timeout) globalThis.clearTimeout(state.bookmarkSelectionRestore.timeout);
       state.bookmarkSelectionRestore = null;
       state.bookmarkPageTurning = false;
       return false;
+    };
+    const beginBookmarkPageGesture = (x, y, time) => {
+      if (state.config?.prefs.readingMode === 'paged') {
+        return { kind: 'paged', active: pager.begin(x, y, time) };
+      }
+      if (state.config?.prefs.readingMode !== 'scroll') return null;
+      const renderer = state.view?.renderer;
+      const gesture = {
+        kind: 'scroll',
+        startX: x,
+        startY: y,
+        lastX: x,
+        lastY: y,
+        lastTime: time,
+        scrollStart: Number(state.view?.renderer?.start),
+        deltaY: 0,
+        velocityY: 0,
+        pendingScroll: 0,
+        scrollApplying: false,
+        scrollCancelled: false,
+      };
+      return gesture;
+    };
+    const queueBookmarkGestureScroll = (gesture, renderer, delta) => {
+      if (!renderer?.scrolled || !Number.isFinite(delta) || Math.abs(delta) < .01) return;
+      gesture.pendingScroll += delta;
+      if (gesture.scrollApplying) return;
+      gesture.scrollApplying = true;
+      const drain = async () => {
+        try {
+          while (!gesture.scrollCancelled && Math.abs(gesture.pendingScroll) >= .01) {
+            const amount = gesture.pendingScroll;
+            gesture.pendingScroll = 0;
+            const activeRenderer = state.view?.renderer || renderer;
+            const navigate = amount > 0
+              ? activeRenderer.next?.(amount)
+              : activeRenderer.prev?.(-amount);
+            // Foliate returns undefined while its page/section transition lock
+            // is held. Keep the distance and retry on the next frame so a
+            // fast second-finger drag cannot silently lose movement.
+            if (navigate === undefined) {
+              gesture.pendingScroll += amount;
+              await new Promise(resolve => doc.defaultView?.requestAnimationFrame(resolve));
+              continue;
+            }
+            await Promise.resolve(navigate);
+          }
+        } catch {} finally {
+          gesture.scrollApplying = false;
+        }
+      };
+      gesture.scrollQueue = drain();
+    };
+    const moveBookmarkPageGesture = (gesture, x, y, time) => {
+      if (!gesture) return false;
+      if (gesture.kind === 'paged') return gesture.active && pager.move(x, y, time);
+      const renderer = state.view?.renderer;
+      const horizontal = renderer?.scrollProp === 'scrollLeft';
+      const deltaX = x - gesture.lastX;
+      const deltaY = y - gesture.lastY;
+      const dt = Math.max(1, time - gesture.lastTime);
+      const delta = horizontal ? deltaX : deltaY;
+      const instantVelocity = delta / dt;
+      gesture.velocityY = gesture.velocityY * .72 + instantVelocity * .28;
+      gesture.lastX = x;
+      gesture.lastY = y;
+      gesture.deltaY = horizontal ? x - gesture.startX : y - gesture.startY;
+      // The held selection handle has touch-action:none. Letting the browser
+      // perform native scrolling would therefore cancel the whole two-finger
+      // gesture on Android. Move Foliate's scrolled renderer through its
+      // public navigation API, which refreshes its internal scroll bounds.
+      if (renderer?.scrolled) {
+        const scrollDelta = horizontal ? -deltaX : -deltaY;
+        queueBookmarkGestureScroll(gesture, renderer, scrollDelta);
+        if (Math.abs(delta) >= 1) {
+          // next/prev(distance) handles the section boundary itself. Do not
+          // start the independent boundary turner for this same gesture.
+          state.scrollIntentDir = 0;
+          state.scrollIntentUntil = 0;
+        }
+        state.bookmarkHandleController?.render?.();
+      }
+      gesture.lastTime = time;
+      return true;
+    };
+    const endBookmarkPageGesture = (gesture, handlePoint, adjustsSelection = true) => {
+      if (!gesture) return { moved: false, committed: false };
+      if (gesture.kind === 'paged') {
+        return gesture.active
+          ? pager.end(adjustsSelection ? direction => {
+            queueBookmarkSelectionRestore(direction, handlePoint);
+            return true;
+          } : undefined)
+          : { moved: false, committed: false };
+      }
+      const renderer = state.view?.renderer;
+      const size = Number(renderer?.size) || 1;
+      const moved = Math.abs(gesture.deltaY) >= 4;
+      const projectedDelta = gesture.deltaY + gesture.velocityY * 180;
+      const direction = projectedDelta < 0 ? 1 : -1;
+      const distanceTowardTarget = direction > 0 ? -gesture.deltaY : gesture.deltaY;
+      const velocityTowardTarget = direction > 0 ? -gesture.velocityY : gesture.velocityY;
+      const committed = moved
+        && (distanceTowardTarget >= size * .16 || velocityTowardTarget >= .32)
+        && (adjustsSelection
+          ? queueBookmarkSelectionRestore(
+            direction,
+            handlePoint,
+            gesture.scrollStart,
+            Number.isFinite(gesture.pageClientX) && Number.isFinite(gesture.pageClientY)
+              ? { clientX: gesture.pageClientX, clientY: gesture.pageClientY }
+              : null,
+          )
+          : true);
+      return { moved, committed, dir: direction };
+    };
+    const cancelBookmarkPageGesture = gesture => {
+      if (!gesture) return;
+      gesture.scrollCancelled = true;
+      if (gesture.kind === 'paged' && gesture.active) pager.cancel();
     };
     state.bookmarkSelectionPageTurn = turnBookmarkSelectionPage;
     const chooseBookmarkMovingEndpoint = endpoint => {
@@ -920,21 +1250,29 @@ const FOLIATE_BRIDGE = String.raw`
       render: renderBookmarkHandle,
       hide: hideBookmarkHandle,
       start: event => {
-        const model = state.bookmarkSelectionModel;
-        if (!state.bookmarkSelecting || !model?.managed || model.doc !== doc) return;
+        if (!state.bookmarkSelecting) return;
         const changed = Array.from(event.changedTouches || []);
         const held = state.bookmarkHeldHandle;
         if (held?.source === 'custom') {
           const pageTouch = changed.find(point => point.identifier !== held.id);
           if (!pageTouch || state.bookmarkOuterPageGesture) return;
+          const { x, y } = touchCoordinates(pageTouch);
+          const gesture = beginBookmarkPageGesture(x, y, event.timeStamp);
+          const heldPoint = heldHandleContentPoint(held);
+          rememberBookmarkPageTouch(gesture, pageTouch, false);
           state.bookmarkOuterPageGesture = {
             id: pageTouch.identifier,
-            paging: pager.begin(pageTouch.screenX, pageTouch.screenY, event.timeStamp),
+            handleClientX: heldPoint?.clientX,
+            handleClientY: heldPoint?.clientY,
+            adjustsSelection: !!heldPoint,
+            gesture,
           };
           event.preventDefault();
           event.stopImmediatePropagation();
           return;
         }
+        const model = state.bookmarkSelectionModel;
+        if (!model?.managed || model.doc !== doc) return;
         const handle = event.target?.closest?.('.bookmark-selection-handle');
         const point = changed[0];
         if (!handle || !point || !chooseBookmarkMovingEndpoint(handle.dataset.endpoint)) return;
@@ -954,15 +1292,19 @@ const FOLIATE_BRIDGE = String.raw`
       },
       move: event => {
         const held = state.bookmarkHeldHandle;
-        if (held?.source !== 'custom') return;
         const pageGesture = state.bookmarkOuterPageGesture;
         if (pageGesture) {
           const pageTouch = Array.from(event.touches || []).find(point => point.identifier === pageGesture.id);
-          if (pageTouch && pageGesture.paging) pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+          if (pageTouch && pageGesture.gesture) {
+            const { x, y } = touchCoordinates(pageTouch);
+            rememberBookmarkPageTouch(pageGesture.gesture, pageTouch, false);
+            moveBookmarkPageGesture(pageGesture.gesture, x, y, event.timeStamp);
+          }
           event.preventDefault();
           event.stopImmediatePropagation();
           return;
         }
+        if (held?.source !== 'custom') return;
         const touchPoint = Array.from(event.touches || []).find(point => point.identifier === held.id);
         if (!touchPoint) return;
         held.clientX = touchPoint.clientX;
@@ -979,20 +1321,24 @@ const FOLIATE_BRIDGE = String.raw`
       },
       end: event => {
         const held = state.bookmarkHeldHandle;
-        if (held?.source !== 'custom') return;
         const changed = Array.from(event.changedTouches || []);
         const pageGesture = state.bookmarkOuterPageGesture;
         if (pageGesture && changed.some(point => point.identifier === pageGesture.id)) {
           const pageTouch = changed.find(point => point.identifier === pageGesture.id);
-          if (pageTouch && pageGesture.paging) pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+          if (pageTouch && pageGesture.gesture) {
+            const { x, y } = touchCoordinates(pageTouch);
+            rememberBookmarkPageTouch(pageGesture.gesture, pageTouch, false);
+            moveBookmarkPageGesture(pageGesture.gesture, x, y, event.timeStamp);
+          }
           state.bookmarkOuterPageGesture = null;
-          if (pageGesture.paging) pager.end(direction => queueBookmarkSelectionRestore(direction, heldHandleContentPoint(held)));
+          if (pageGesture.gesture) endBookmarkPageGesture(pageGesture.gesture, heldHandleContentPoint(held));
           event.preventDefault();
           event.stopImmediatePropagation();
           return;
         }
+        if (held?.source !== 'custom') return;
         if (!changed.some(point => point.identifier === held.id)) return;
-        if (state.bookmarkOuterPageGesture) pager.cancel();
+        if (state.bookmarkOuterPageGesture) cancelBookmarkPageGesture(state.bookmarkOuterPageGesture.gesture);
         state.bookmarkOuterPageGesture = null;
         state.bookmarkHeldHandle = null;
         event.preventDefault();
@@ -1001,9 +1347,14 @@ const FOLIATE_BRIDGE = String.raw`
       },
       cancel: event => {
         const held = state.bookmarkHeldHandle;
+        if (state.bookmarkOuterPageGesture) {
+          cancelBookmarkPageGesture(state.bookmarkOuterPageGesture.gesture);
+          state.bookmarkOuterPageGesture = null;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
         if (held?.source !== 'custom') return;
-        pager.cancel();
-        state.bookmarkOuterPageGesture = null;
         state.bookmarkHeldHandle = null;
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -1133,6 +1484,32 @@ const FOLIATE_BRIDGE = String.raw`
         return;
       }
       if (state.bookmarkSelecting) {
+        // Android may drop the native DOM range as soon as the second finger
+        // lands. The held custom/native handle is the reliable signal that
+        // this touch is the page gesture, so do not require activeRange here.
+        const heldHandle = state.bookmarkHeldHandle;
+        const pageTouch = event.changedTouches[event.changedTouches.length - 1];
+        if (heldHandle && pageTouch && pageTouch.identifier !== heldHandle.id && !state.bookmarkOuterPageGesture) {
+          const heldPoint = heldHandleContentPoint(heldHandle);
+          const { x, y } = touchCoordinates(pageTouch);
+          const gesture = beginBookmarkPageGesture(x, y, event.timeStamp);
+          rememberBookmarkPageTouch(gesture, pageTouch, true);
+          state.bookmarkOuterPageGesture = {
+            id: pageTouch.identifier,
+            handleClientX: heldPoint?.clientX,
+            handleClientY: heldPoint?.clientY,
+            adjustsSelection: !!heldPoint,
+            gesture,
+          };
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (state.bookmarkOuterPageGesture) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
         const selection = doc.getSelection?.();
         const selectedRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
         const model = state.bookmarkSelectionModel?.doc === doc ? state.bookmarkSelectionModel : null;
@@ -1184,13 +1561,20 @@ const FOLIATE_BRIDGE = String.raw`
             held.clientX = handleTouch.clientX;
             held.clientY = handleTouch.clientY;
           }
+          // A selected range must not disable ordinary vertical scrolling.
+          // Only a held selection handle plus another finger owns this path.
+          if (state.config?.prefs.readingMode === 'scroll' && !state.bookmarkHeldHandle)
+            return;
           const heldPoint = heldHandleContentPoint(held);
-          bookmarkPageGesture = {
+          const { x, y } = touchCoordinates(pageTouch);
+          const gesture = beginBookmarkPageGesture(x, y, event.timeStamp);
+          rememberBookmarkPageTouch(gesture, pageTouch, true);
+          state.bookmarkOuterPageGesture = {
             id: pageTouch.identifier,
             handleClientX: heldPoint?.clientX,
             handleClientY: heldPoint?.clientY,
             adjustsSelection: !!heldPoint,
-            paging: pager.begin(pageTouch.screenX, pageTouch.screenY, event.timeStamp),
+            gesture,
           };
           event.preventDefault();
           event.stopImmediatePropagation();
@@ -1212,8 +1596,13 @@ const FOLIATE_BRIDGE = String.raw`
             if (!initialTouch || state.bookmarkSelectionModel) return;
             if (beginCustomBookmarkSelection(initialTouch)) bookmarkSelectionTouch = null;
           }, 460) || 0;
-          event.preventDefault();
-          event.stopImmediatePropagation();
+          // With no active selection, continuous mode must keep Foliate's
+          // native vertical scrolling alive. The long-press timer still
+          // creates a selection when the finger stays still.
+          if (state.config?.prefs.readingMode !== 'scroll') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
           return;
         }
         event.stopImmediatePropagation();
@@ -1253,11 +1642,16 @@ const FOLIATE_BRIDGE = String.raw`
       }
     }, { passive: false, capture: true });
     doc.addEventListener('touchmove', event => {
-      if (bookmarkPageGesture) {
-        const pageTouch = Array.from(event.touches).find(point => point.identifier === bookmarkPageGesture.id);
-        const handleTouch = Array.from(event.touches).find(point => point.identifier !== bookmarkPageGesture.id);
-        if (pageTouch && bookmarkPageGesture.paging)
-          pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+      if (state.bookmarkOuterPageGesture) {
+        const pageGesture = state.bookmarkOuterPageGesture;
+        const pageTouch = Array.from(event.touches).find(point => point.identifier === pageGesture.id);
+        const handleTouch = Array.from(event.touches).find(point => point.identifier !== pageGesture.id);
+        if (pageTouch && pageGesture.gesture) {
+          const { x, y } = touchCoordinates(pageTouch);
+          rememberBookmarkPageTouch(pageGesture.gesture, pageTouch, true);
+          moveBookmarkPageGesture(pageGesture.gesture, x, y, event.timeStamp);
+          rememberBookmarkPageTouch(pageGesture.gesture, pageTouch, true);
+        }
         if (handleTouch && state.bookmarkHeldHandle?.source !== 'custom') {
           const held = state.bookmarkHeldHandle;
           if (held?.source === 'native' && held.id === handleTouch.identifier) {
@@ -1266,14 +1660,14 @@ const FOLIATE_BRIDGE = String.raw`
           }
           const heldPoint = heldHandleContentPoint(held);
           if (heldPoint) {
-            bookmarkPageGesture.handleClientX = heldPoint.clientX;
-            bookmarkPageGesture.handleClientY = heldPoint.clientY;
+            pageGesture.handleClientX = heldPoint.clientX;
+            pageGesture.handleClientY = heldPoint.clientY;
           }
         } else if (state.bookmarkHeldHandle?.source === 'custom') {
           const heldPoint = heldHandleContentPoint(state.bookmarkHeldHandle);
           if (heldPoint) {
-            bookmarkPageGesture.handleClientX = heldPoint.clientX;
-            bookmarkPageGesture.handleClientY = heldPoint.clientY;
+            pageGesture.handleClientX = heldPoint.clientX;
+            pageGesture.handleClientY = heldPoint.clientY;
           }
         }
         event.preventDefault();
@@ -1288,8 +1682,10 @@ const FOLIATE_BRIDGE = String.raw`
           bookmarkSelectionTimer = 0;
           bookmarkSelectionTouch = null;
         }
-        event.preventDefault();
-        event.stopImmediatePropagation();
+        if (state.config?.prefs.readingMode !== 'scroll') {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
         return;
       }
       if (state.bookmarkSelecting) {
@@ -1301,6 +1697,7 @@ const FOLIATE_BRIDGE = String.raw`
           held.clientX = handleTouch.clientX;
           held.clientY = handleTouch.clientY;
         }
+        if (state.config?.prefs.readingMode === 'scroll' && !held) return;
         event.stopImmediatePropagation();
         return;
       }
@@ -1326,11 +1723,15 @@ const FOLIATE_BRIDGE = String.raw`
       }
     }, { passive: false, capture: true });
     doc.addEventListener('touchend', event => {
-      if (bookmarkPageGesture && Array.from(event.changedTouches).some(point => point.identifier === bookmarkPageGesture.id)) {
-        const gesture = bookmarkPageGesture;
+      if (state.bookmarkOuterPageGesture && Array.from(event.changedTouches).some(point => point.identifier === state.bookmarkOuterPageGesture.id)) {
+        const gesture = state.bookmarkOuterPageGesture;
         const endedTouch = Array.from(event.changedTouches).find(point => point.identifier === gesture.id);
-        if (endedTouch && gesture.paging)
-          pager.move(endedTouch.screenX, endedTouch.screenY, event.timeStamp);
+        if (endedTouch && gesture.gesture) {
+          const { x, y } = touchCoordinates(endedTouch);
+          rememberBookmarkPageTouch(gesture.gesture, endedTouch, true);
+          moveBookmarkPageGesture(gesture.gesture, x, y, event.timeStamp);
+          rememberBookmarkPageTouch(gesture.gesture, endedTouch, true);
+        }
         const handleTouch = Array.from(event.touches).find(point => point.identifier !== gesture.id);
         if (handleTouch && state.bookmarkHeldHandle?.source !== 'custom') {
           const held = state.bookmarkHeldHandle;
@@ -1350,24 +1751,24 @@ const FOLIATE_BRIDGE = String.raw`
             gesture.handleClientY = heldPoint.clientY;
           }
         }
-        bookmarkPageGesture = null;
+        state.bookmarkOuterPageGesture = null;
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (!gesture.paging) return;
         const handlePoint = Number.isFinite(gesture.handleClientX) && Number.isFinite(gesture.handleClientY)
           ? { clientX: gesture.handleClientX, clientY: gesture.handleClientY }
           : null;
-        if (gesture.adjustsSelection)
-          pager.end(direction => queueBookmarkSelectionRestore(direction, handlePoint));
-        else pager.end();
+        if (gesture.gesture)
+          endBookmarkPageGesture(gesture.gesture, gesture.adjustsSelection ? handlePoint : null, gesture.adjustsSelection);
         return;
       }
       if (bookmarkSelectionTouch && Array.from(event.changedTouches).some(point => point.identifier === bookmarkSelectionTouch.id)) {
         if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
         bookmarkSelectionTimer = 0;
         bookmarkSelectionTouch = null;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+        if (state.config?.prefs.readingMode !== 'scroll') {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
         return;
       }
       if (bookmarkShortcut) {
@@ -1388,6 +1789,7 @@ const FOLIATE_BRIDGE = String.raw`
             });
           }
         }
+        if (state.config?.prefs.readingMode === 'scroll' && !held) return;
         event.stopImmediatePropagation();
         return;
       }
@@ -1416,9 +1818,10 @@ const FOLIATE_BRIDGE = String.raw`
       doc.defaultView?.requestAnimationFrame(() => doc.defaultView?.requestAnimationFrame(() => handleTap(finished.screenX)));
     }, { passive: false, capture: true });
     doc.addEventListener('touchcancel', event => {
-      if (bookmarkPageGesture && Array.from(event.changedTouches).some(point => point.identifier === bookmarkPageGesture.id)) {
-        pager.cancel();
-        bookmarkPageGesture = null;
+      if (state.bookmarkOuterPageGesture && Array.from(event.changedTouches).some(point => point.identifier === state.bookmarkOuterPageGesture.id)) {
+        const gesture = state.bookmarkOuterPageGesture;
+        cancelBookmarkPageGesture(gesture.gesture);
+        state.bookmarkOuterPageGesture = null;
         event.stopImmediatePropagation();
         return;
       }
@@ -1442,6 +1845,7 @@ const FOLIATE_BRIDGE = String.raw`
           applyBookmarkSelectionModel();
           renderBookmarkHandle();
         }
+        if (state.config?.prefs.readingMode === 'scroll' && !held) return;
         event.stopImmediatePropagation();
         return;
       }
@@ -1680,9 +2084,7 @@ const FOLIATE_BRIDGE = String.raw`
         if (bookmarkRestore) {
           state.bookmarkSelectionRestore = null;
           if (bookmarkRestore.timeout) globalThis.clearTimeout(bookmarkRestore.timeout);
-          Promise.resolve(bookmarkRestore.run(state.visibleRange)).catch(error => {
-            console.warn('[MOWEN_SELECTION_PAGE]', error?.message || String(error));
-          }).finally(() => {
+          Promise.resolve(bookmarkRestore.run(state.visibleRange)).catch(() => {}).finally(() => {
             state.bookmarkPageTurning = false;
             state.bookmarkHandleController?.render?.();
           });
@@ -1693,6 +2095,9 @@ const FOLIATE_BRIDGE = String.raw`
       view.history?.addEventListener?.('index-change', emitNavigationState);
       await view.open(file);
       view.renderer.addEventListener('scroll', () => {
+        if (state.bookmarkSelecting && !state.bookmarkPageTurning
+          && !state.bookmarkHeldHandle && !state.bookmarkOuterPageGesture)
+          state.bookmarkHandleController?.render?.();
         if (state.scrollIntentUntil >= performance.now()) queueScrolledBoundaryCheck();
       });
       applyConfig(config);
@@ -1704,6 +2109,7 @@ const FOLIATE_BRIDGE = String.raw`
         // or total progression above.
         showTextStart: false
       });
+      debug('book ready contents=' + (view.renderer?.getContents?.().length || 0));
       emitNavigationState();
       send({ type: 'book-ready', toc: flattenTOC(view.book.toc) });
     } catch (error) {
@@ -1714,6 +2120,7 @@ const FOLIATE_BRIDGE = String.raw`
     appendChunk: chunk => state.chunks.push(chunk),
     open,
     configure: applyConfig,
+    configureBookmarks: applyBookmarks,
     next: () => pager.turn(1),
     previous: () => pager.turn(-1),
     goTo: target => state.view?.goTo(target),
@@ -1773,11 +2180,32 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const imageTransfers = useRef(new Map<string, { selection: FoliateLongPress; chunks: string[] }>()).current;
-  const config = { prefs: props.prefs, palette: props.palette };
+  const config = {
+    prefs: props.prefs,
+    palette: props.palette,
+    bookmarks: props.bookmarks.map((bookmark) => ({
+      id: bookmark.id,
+      sectionIndex: bookmark.sectionIndex,
+      excerpt: bookmark.excerpt,
+      locator: bookmark.locator,
+    })),
+  };
+
+  const bookmarkConfig = useCallback((bookmarks: Bookmark[]) => bookmarks.map((bookmark) => ({
+    id: bookmark.id,
+    sectionIndex: bookmark.sectionIndex,
+    excerpt: bookmark.excerpt,
+    locator: bookmark.locator,
+  })), []);
 
   const call = useCallback((method: string, ...args: unknown[]) => {
     webView.current?.injectJavaScript(injectCall(method, ...args));
   }, []);
+
+  const setBookmarks = useCallback((bookmarks: Bookmark[]) => {
+    console.log('[MOWEN_BOOKMARK] native setBookmarks count=' + bookmarks.length + ' webView=' + (!!webView.current));
+    call('configureBookmarks', bookmarkConfig(bookmarks));
+  }, [bookmarkConfig, call]);
 
   useImperativeHandle(ref, () => ({
     next: () => call('next'),
@@ -1788,11 +2216,15 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     back: () => call('back'),
     beginBookmarkSelection: () => call('beginBookmarkSelection'),
     endBookmarkSelection: () => call('endBookmarkSelection'),
-  }), [call]);
+    setBookmarks,
+  }), [call, setBookmarks]);
 
   useEffect(() => {
     if (!loading && !error) call('configure', config);
   }, [error, loading, props.palette, props.prefs, call]);
+  useEffect(() => {
+    if (!loading && !error) setBookmarks(props.bookmarks);
+  }, [error, loading, props.bookmarks, setBookmarks]);
 
   const sendBook = useCallback(async () => {
     if (started.current) return;
@@ -1821,6 +2253,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     let message: HostMessage;
     try { message = JSON.parse(event.nativeEvent.data) as HostMessage; }
     catch { return; }
+    if (message.type === 'debug') { console.log(message.message); return; }
     if (message.type === 'host-ready') { void sendBook(); return; }
     if (message.type === 'book-ready') { setLoading(false); props.onReady(message.toc); return; }
     if (message.type === 'relocate') { props.onLocationChange(message); return; }

@@ -76,6 +76,7 @@ export type Bookmark = {
   bookId: string;
   chapterIndex: number;
   paragraphIndex: number;
+  sectionIndex?: number;
   chapterTitle: string;
   excerpt: string;
   locator?: EpubLocator;
