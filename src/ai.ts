@@ -44,10 +44,7 @@ function extractDeltaContent(value: unknown): string {
 
 async function readStreamingResponse(response: Response, onDelta?: (delta: string) => void) {
   const reader = response.body?.getReader();
-  if (!reader) {
-    console.log('[墨问AI] response.body unavailable; falling back to full-body parsing');
-    return null;
-  }
+  if (!reader) return null;
   const decoder = new TextDecoder();
   let buffer = '';
   let raw = '';
@@ -61,9 +58,7 @@ async function readStreamingResponse(response: Response, onDelta?: (delta: strin
       const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
       const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
       if (delta) { content += delta; onDelta?.(delta); }
-    } catch {
-      console.warn('[墨问AI] failed to parse one SSE frame', { firstChar: data[0] ?? '', length: data.length });
-    }
+    } catch { }
   };
   while (true) {
     const { done, value } = await reader.read();
@@ -74,10 +69,8 @@ async function readStreamingResponse(response: Response, onDelta?: (delta: strin
       const start = raw.trimStart();
       if (start.startsWith('data:')) {
         mode = 'sse';
-        console.log('[墨问AI] response mode: SSE');
       } else if (start.startsWith('{') || start.startsWith('[')) {
         mode = 'json';
-        console.log('[墨问AI] response mode: JSON');
       }
     }
     if (mode === 'sse') {
@@ -104,7 +97,6 @@ async function readStreamingResponse(response: Response, onDelta?: (delta: strin
 function createSseParser(onDelta?: (delta: string) => void) {
   let buffer = '';
   let content = '';
-  let frameCount = 0;
   const consumeLine = (line: string) => {
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
@@ -112,10 +104,8 @@ function createSseParser(onDelta?: (delta: string) => void) {
     try {
       const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
       const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
-      if (delta) { content += delta; frameCount++; onDelta?.(delta); }
-    } catch {
-      console.warn('[墨问AI] failed to parse XHR SSE frame', { firstChar: data[0] ?? '', length: data.length });
-    }
+      if (delta) { content += delta; onDelta?.(delta); }
+    } catch { }
   };
   return {
     feed(chunk: string) {
@@ -126,7 +116,6 @@ function createSseParser(onDelta?: (delta: string) => void) {
     },
     finish() {
       consumeLine(buffer);
-      console.log('[墨问AI] XHR SSE complete', { frames: frameCount, contentLength: content.length });
       return content.trim();
     },
   };
@@ -175,7 +164,6 @@ function requestWithXhr(url: string, apiKey: string, requestBody: Record<string,
       } catch (error) { fail(error instanceof Error ? error : new Error('模型返回内容无法解析')); }
     };
     signal?.addEventListener('abort', handleAbort, { once: true });
-    console.log('[墨问AI] using XHR progress streaming');
     xhr.send(JSON.stringify(requestBody));
   });
 }
@@ -263,11 +251,6 @@ export async function askAI(options: {
     }),
     signal,
   });
-  console.log('[墨问AI] response received', {
-    status: response.status,
-    contentType: response.headers.get('content-type') ?? '',
-    hasBody: !!response.body,
-  });
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`模型接口返回 ${response.status}${body ? `：${body.slice(0, 120)}` : ''}`);
@@ -279,7 +262,6 @@ export async function askAI(options: {
   }
   const body = await response.text();
   const bodyStart = body.trimStart();
-  console.log('[墨问AI] full-body fallback', { length: body.length, startsWithData: bodyStart.startsWith('data:') });
   if (bodyStart.startsWith('data:')) {
     let content = '';
     for (const line of body.split(/\r?\n/)) {
@@ -290,9 +272,7 @@ export async function askAI(options: {
         const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
         const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
         if (delta) { content += delta; onDelta?.(delta); }
-      } catch {
-        console.warn('[墨问AI] failed to parse fallback SSE frame', { firstChar: data[0] ?? '', length: data.length });
-      }
+      } catch { }
     }
     if (content.trim()) return content.trim();
   }

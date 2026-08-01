@@ -12,7 +12,9 @@
 ## 产品与架构不变量
 
 - `foliate-js` 是唯一 EPUB 排版引擎。不要恢复自制分页器、按段落估算页数、`FlatList` 正文阅读器或无原始 EPUB 的旧回退阅读器。
-- `App.tsx` 负责原生界面、书架、阅读工具栏、设置、书签与 AI 面板；`src/FoliateReader.tsx` 负责 WebView 生命周期和原生桥接。
+- `App.tsx` 只负责应用级状态、书架操作、持久化协调和页面切换；`src/components/` 负责书架、阅读屏、工具栏、弹层和 AI 面板；`src/FoliateReader.tsx` 只负责 WebView 生命周期与原生桥接。
+- `src/foliate/runtime.ts` 与 `src/foliate/runtimePart*.ts` 共同组成 WebView 内的 HTML/CSS/JavaScript 运行时源码；修改排版、分页、脚注或手势时只改这些源文件，并同步运行 Foliate smoke 测试。
+- `src/ui/theme.ts` 是主题和调色板的唯一来源，`src/ui/styles.ts` 是共享原生样式；组件不得重新定义第二套主题常量。
 - `web/foliate-entry.js` 是 Foliate 浏览器包入口；`src/generated/foliateBundle.ts` 是生成物。需要改变打包入口时编辑 `web/` 或 `scripts/build-foliate.mjs`，然后运行 `npm run build:foliate`，不要手改生成文件。
 - `src/epub.ts` 负责导入和解析元数据/AI 上下文；原始 `epubUri` 必须保留，实际排版交给 Foliate。
 - EPUB CFI 是书签、历史对话和恢复阅读位置的权威定位。全书进度使用 Foliate 的 total progression/position，不能退化为章节内页码或段落比例。
@@ -21,6 +23,13 @@
 - EPUB 自带 CSS 不可信。覆盖样式时优先使用语义规则，并为标题、图注、表格、列表、脚注等结构设置明确例外；不要按某一本书的文件名或章节号打补丁。
 - 注释链接应在当前阅读界面内展示完整内容。内部脚注跳转不得把用户丢到章节末尾，弹层不得出现横向滚动。
 - 长按文字默认选中所在段落并打开 AI；长按图片传递图片；中央单击切换工具栏；分页模式左右点击切页。这些手势不可互相吞事件。
+
+## 文件边界
+
+- 一个文件只保留一个主要职责；新组件优先放入 `src/components/` 对应领域目录，不把业务组件重新堆回 `App.tsx`。
+- 纯计算、消息校验和格式转换放入无 UI 依赖的模块，便于 Node 测试；组件文件不直接承担 EPUB 解析或持久化迁移。
+- `src/generated/foliateBundle.ts`、`android/`、`ios/`、`.expo/` 和 `dist/` 属于生成物或环境目录，不手工编辑，也不把它们当作拆分目标。
+- 本仓库的规范文件名是根目录 `AGENTS.md`；不要另建大小写不同或内容重复的 `agent.md`。
 
 ## 代码实现准则
 

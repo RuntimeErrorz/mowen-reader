@@ -7,10 +7,12 @@ import { pathToFileURL } from 'node:url';
 const epubPath = process.argv[2];
 if (!epubPath) throw new Error('Usage: npm run smoke:foliate -- <book.epub>');
 
-const component = await readFile(new URL('../src/FoliateReader.tsx', import.meta.url), 'utf8');
+const FOLIATE_BRIDGE_PART_COUNT = 12;
+const runtime = await readFile(new URL('../src/foliate/runtime.ts', import.meta.url), 'utf8');
 const generated = await readFile(new URL('../src/generated/foliateBundle.ts', import.meta.url), 'utf8');
-const html = component.match(/const FOLIATE_HTML = `([\s\S]*?)`;/)?.[1];
-const bridge = component.match(/const FOLIATE_BRIDGE = String\.raw`([\s\S]*?)`;/)?.[1];
+const html = runtime.match(/export const FOLIATE_HTML = `([\s\S]*?)`;/)?.[1];
+const bridgePartSources = await Promise.all(Array.from({ length: FOLIATE_BRIDGE_PART_COUNT }, (_value, index) => readFile(new URL(`../src/foliate/runtimePart${index}.ts`, import.meta.url), 'utf8')));
+const bridge = bridgePartSources.map((source) => source.match(/String\.raw`([\s\S]*?)`;\s*$/)?.[1] ?? '').join('');
 const bundleSource = generated.match(/export const FOLIATE_BUNDLE = ([\s\S]*);\s*$/)?.[1];
 if (!html || !bridge || !bundleSource) throw new Error('Could not extract the generated Foliate runtime');
 
@@ -135,7 +137,6 @@ try {
   if (!initialCustomState.text.trim() || initialCustomState.collapsed || initialCustomState.visibleHandles !== 2)
     throw new Error(`Foliate initial custom selection failed: ${JSON.stringify(initialCustomState)}`);
   await evaluate(`globalThis.__MOWEN__.endBookmarkSelection();true`);
-  const selectionDirections = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const selectionSetup = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const renderer=view?.renderer;const visible=view?.lastLocation?.range?.cloneRange?.();if(!renderer||!visible)return JSON.stringify({direction:0,reason:'missing-visible-range'});const direction=${attempt}>0&&renderer.page>1?-1:renderer.page<renderer.pages-2?1:renderer.page>1?-1:0;if(!direction)return JSON.stringify({direction:0,reason:'no-adjacent-page-in-section'});const rects=Array.from(visible.getClientRects()).filter(rect=>rect.width>0&&rect.height>0);if(!rects.length)return JSON.stringify({direction:0,reason:'selection-has-no-rects'});globalThis.__MOWEN__.beginBookmarkSelection();const selection=visible.startContainer.ownerDocument.defaultView.getSelection();selection.removeAllRanges();selection.addRange(visible);const endpoint=direction<0?rects[0]:rects[rects.length-1];const left=Math.min(...rects.map(rect=>rect.left));const right=Math.max(...rects.map(rect=>rect.right));const doc=visible.startContainer.ownerDocument;return JSON.stringify({direction,initialText:selection.toString(),point:{clientX:direction<0?endpoint.left:endpoint.right,clientY:endpoint.bottom},pageLeft:left,pageRight:right,width:renderer.size,height:doc.documentElement.clientHeight})})()`));
     if (!selectionSetup.direction) break;
@@ -185,13 +186,10 @@ try {
         const adjustedState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const selection=doc.getSelection();return JSON.stringify({text:selection?.toString?.()||'',collapsed:selection?.rangeCount?selection.getRangeAt(0).collapsed:true,handleVisible:!!document.querySelector('.bookmark-selection-handle.visible')})})()`));
         if (adjustedState.collapsed || !adjustedState.handleVisible || !adjustedState.text.includes(selectionSetup.initialText) || adjustedState.text === continuedState.text)
           throw new Error(`Foliate managed selection handle was not adjustable: ${JSON.stringify({ selectionSetup, continuedState, adjustedState })}`);
-        selectionDirections.push('continued-next+handle-drag');
       }
     }
     await evaluate(`globalThis.__MOWEN__.endBookmarkSelection();true`);
-    selectionDirections.push(selectionSetup.direction < 0 ? 'previous' : 'next');
   }
-  const selectionResult = selectionDirections.length ? `${selectionDirections.join('+')} validated` : 'skipped';
   const footnote = await evaluate(`(async()=>{const view=document.querySelector('foliate-view');for(let index=0;index<view.book.sections.length;index++){const source=await view.book.sections[index].createDocument?.();if(!source?.querySelector('a[href] sup'))continue;await view.goTo(index);const live=view.renderer.getContents()[0]?.doc;const link=live?.querySelector('a[href] sup')?.closest('a[href]');if(!link)return 'missing-live-link';link.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:live.defaultView}));return 'clicked';}return 'none';})()`, 30_000);
   if (footnote === 'clicked') {
     let noteOpen = false;
@@ -203,7 +201,6 @@ try {
     }
     if (!noteOpen) throw new Error('Foliate found a footnote link but did not render its content');
   } else if (footnote !== 'none') throw new Error(`Foliate footnote test failed: ${footnote}`);
-  console.log(`Foliate smoke test passed: page-turn CFI advanced at ${state.relocate}, initial custom handles validated, cross-page selection ${selectionResult}, footnote ${footnote === 'clicked' ? 'rendered' : 'not present'}`);
 } finally {
   socket?.close();
   const exited = new Promise(resolve => browser.once('exit', resolve));
@@ -211,7 +208,5 @@ try {
   await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 3000))]);
   try {
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-  } catch (error) {
-    console.warn(`Smoke test passed but could not remove temporary browser profile: ${error.message}`);
-  }
+  } catch { }
 }
