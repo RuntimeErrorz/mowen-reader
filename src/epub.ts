@@ -56,7 +56,11 @@ function extractFootnotes(html: string) {
   return notes;
 }
 
-function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
+function stripHtml(
+  html: string,
+  globalNotes: Record<string, string> = {},
+  imageMarker?: (source: string) => string,
+) {
   const notes: Record<string, string> = {};
   const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
   const standaloneNoteRegex = /<(?:p|li|aside)\b[^>]*(?:class=["'][^"']*(?:fncontent|footnote)[^"']*["']|epub:type=["'](?:footnote|endnote)["'])[^>]*>[\s\S]*?<\/(?:p|li|aside)>/gi;
@@ -76,7 +80,11 @@ function stripHtml(html: string, globalNotes: Record<string, string> = {}) {
       }
       return inner;
     })
-    .replace(/<img\b[^>]*>/gi, '\n〔插图〕\n')
+    .replace(/<img\b([^>]*)>/gi, (_tag, attributes) => {
+      const source = attributes.match(/\bsrc=["']([^"']+)["']/i)?.[1] ?? '';
+      const marker = imageMarker?.(source);
+      return `\n${marker || '〔插图〕'}\n`;
+    })
     .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/blockquote)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
   body = decode(body).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n');
@@ -116,6 +124,11 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
   const opfBase = dirname(opfPath);
   const manifestItems = asArray<any>(pkg?.manifest?.item);
   const byId = new Map(manifestItems.map((item) => [attr(item, 'id'), item]));
+  const imageMimeByPath = new Map(
+    manifestItems
+      .filter((item) => String(attr(item, 'media-type')).startsWith('image/'))
+      .map((item) => [resolvePath(opfBase, attr(item, 'href')), attr(item, 'media-type')]),
+  );
   const spineItems = asArray<any>(pkg?.spine?.itemref);
 
   const navItem = manifestItems.find((item) => String(attr(item, 'properties')).includes('nav'));
@@ -137,7 +150,13 @@ export async function parseEpub(uri: string, fallbackName: string): Promise<Book
   documents.forEach(({ html }) => Object.assign(globalNotes, extractFootnotes(html)));
 
   const chapters = documents.flatMap<Chapter>(({ index, item, path, html }) => {
-    const parsed = stripHtml(html, globalNotes);
+    const parsed = stripHtml(html, globalNotes, (source) => {
+      if (!source) return '';
+      if (/^data:image\//i.test(source)) return `[[MOWEN_IMAGE_DATA:${source}]]`;
+      const imagePath = resolvePath(dirname(path), source.split(/[?#]/)[0]);
+      const mime = imageMimeByPath.get(imagePath) || '';
+      return `[[MOWEN_IMAGE_EPUB:${imagePath}${mime ? `|${mime}` : ''}]]`;
+    });
     if (!parsed.paragraphs.length) return [];
     return [{
       id: `${index}-${attr(item, 'id')}`,

@@ -128,6 +128,70 @@ try {
   if (state.error || state.pager?.currentCfi === previousCfi || state.pager?.turning) {
     throw new Error(state.error || `Foliate composited page turn did not settle: ${JSON.stringify({ previousLocation, previousCfi, state })}`);
   }
+  const initialCustomSetup = JSON.parse(await evaluate(`(()=>{globalThis.__MOWEN__.beginBookmarkSelection();const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const rect=Array.from(view.lastLocation.range.getClientRects()).find(rect=>rect.width>2&&rect.height>2);if(!rect)return JSON.stringify({started:false});const win=doc.defaultView;const point=new win.Touch({identifier:77,target:doc.body,clientX:rect.left+Math.min(12,rect.width/2),clientY:rect.top+rect.height/2,pageX:rect.left+Math.min(12,rect.width/2),pageY:rect.top+rect.height/2,screenX:Math.min(120,view.renderer.size*.3),screenY:rect.top+rect.height/2});globalThis.__mowenInitialTouch=point;doc.dispatchEvent(new win.TouchEvent('touchstart',{touches:[point],targetTouches:[point],changedTouches:[point],bubbles:true,cancelable:true}));return JSON.stringify({started:true})})()`));
+  if (!initialCustomSetup.started) throw new Error('Foliate custom bookmark selection had no visible text target');
+  await new Promise(resolve => setTimeout(resolve, 560));
+  const initialCustomState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const win=doc.defaultView;const point=globalThis.__mowenInitialTouch;doc.dispatchEvent(new win.TouchEvent('touchend',{touches:[],targetTouches:[],changedTouches:[point],bubbles:true,cancelable:true}));delete globalThis.__mowenInitialTouch;const selection=doc.getSelection();return JSON.stringify({text:selection?.toString?.()||'',collapsed:selection?.rangeCount?selection.getRangeAt(0).collapsed:true,visibleHandles:document.querySelectorAll('.bookmark-selection-handle.visible').length})})()`));
+  if (!initialCustomState.text.trim() || initialCustomState.collapsed || initialCustomState.visibleHandles !== 2)
+    throw new Error(`Foliate initial custom selection failed: ${JSON.stringify(initialCustomState)}`);
+  await evaluate(`globalThis.__MOWEN__.endBookmarkSelection();true`);
+  const selectionDirections = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const selectionSetup = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const renderer=view?.renderer;const visible=view?.lastLocation?.range?.cloneRange?.();if(!renderer||!visible)return JSON.stringify({direction:0,reason:'missing-visible-range'});const direction=${attempt}>0&&renderer.page>1?-1:renderer.page<renderer.pages-2?1:renderer.page>1?-1:0;if(!direction)return JSON.stringify({direction:0,reason:'no-adjacent-page-in-section'});const rects=Array.from(visible.getClientRects()).filter(rect=>rect.width>0&&rect.height>0);if(!rects.length)return JSON.stringify({direction:0,reason:'selection-has-no-rects'});globalThis.__MOWEN__.beginBookmarkSelection();const selection=visible.startContainer.ownerDocument.defaultView.getSelection();selection.removeAllRanges();selection.addRange(visible);const endpoint=direction<0?rects[0]:rects[rects.length-1];const left=Math.min(...rects.map(rect=>rect.left));const right=Math.max(...rects.map(rect=>rect.right));const doc=visible.startContainer.ownerDocument;return JSON.stringify({direction,initialText:selection.toString(),point:{clientX:direction<0?endpoint.left:endpoint.right,clientY:endpoint.bottom},pageLeft:left,pageRight:right,width:renderer.size,height:doc.documentElement.clientHeight})})()`));
+    if (!selectionSetup.direction) break;
+    const selectionStartCfi = JSON.parse(await evaluate(`JSON.stringify(globalThis.__MOWEN__.pagerStatus())`)).currentCfi;
+    await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const win=doc.defaultView;const makeTouch=(identifier,clientX,clientY,screenX)=>new win.Touch({identifier,target:doc.body,clientX,clientY,pageX:clientX,pageY:clientY,screenX,screenY:clientY});const handle=makeTouch(101,${selectionSetup.point.clientX},${selectionSetup.point.clientY + 23},${selectionSetup.direction < 0 ? selectionSetup.width * 0.2 : selectionSetup.width * 0.8});const startClientX=${selectionSetup.direction < 0 ? selectionSetup.pageLeft + selectionSetup.width * 0.2 : selectionSetup.pageRight - selectionSetup.width * 0.2};const endClientX=startClientX+${selectionSetup.direction < 0 ? selectionSetup.width * 0.6 : -selectionSetup.width * 0.6};const startScreenX=${selectionSetup.direction < 0 ? selectionSetup.width * 0.2 : selectionSetup.width * 0.8};const endScreenX=${selectionSetup.direction < 0 ? selectionSetup.width * 0.8 : selectionSetup.width * 0.2};const y=${selectionSetup.height * 0.5};const start=makeTouch(202,startClientX,y,startScreenX);const end=makeTouch(202,endClientX,y,endScreenX);const fire=(type,touches,changedTouches)=>doc.dispatchEvent(new win.TouchEvent(type,{touches,targetTouches:touches,changedTouches,bubbles:true,cancelable:true}));fire('touchstart',[handle,start],[start]);fire('touchmove',[handle,end],[end]);fire('touchend',[handle],[end]);return true})()`);
+    const expectedHandle = {
+      clientX: selectionSetup.point.clientX + selectionSetup.direction * selectionSetup.width,
+      clientY: selectionSetup.point.clientY,
+    };
+    const selectionDeadline = Date.now() + 15_000;
+    let selectionState;
+    while (Date.now() < selectionDeadline) {
+      selectionState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view?.renderer?.getContents?.()[0]?.doc;const selection=doc?.getSelection?.();const range=selection?.rangeCount?selection.getRangeAt(0):null;const rects=range?Array.from(range.getClientRects()).filter(rect=>rect.width>0&&rect.height>0):[];const handle=rects.length?(${selectionSetup.direction}<0?rects[0]:rects[rects.length-1]):null;const visible=view?.lastLocation?.range;const visibleRects=visible?Array.from(visible.getClientRects()).filter(rect=>rect.width>0&&rect.height>0):[];const caret=doc?.caretPositionFromPoint?.(${expectedHandle.clientX},${expectedHandle.clientY});const managed=document.querySelector('.bookmark-selection-handle.visible');const managedRect=managed?.getBoundingClientRect?.();return JSON.stringify({pager:globalThis.__MOWEN__.pagerStatus(),page:view?.renderer?.page,text:selection?.toString?.()||'',collapsed:range?.collapsed??true,handle:handle?{clientX:${selectionSetup.direction}<0?handle.left:handle.right,clientY:handle.bottom}:null,managedHandle:managed?{visible:true,left:managedRect.left,top:managedRect.top}:null,visible:visibleRects.length?{left:Math.min(...visibleRects.map(rect=>rect.left)),right:Math.max(...visibleRects.map(rect=>rect.right)),top:Math.min(...visibleRects.map(rect=>rect.top)),bottom:Math.max(...visibleRects.map(rect=>rect.bottom))}:null,caret:caret?{offset:caret.offset,node:caret.offsetNode?.nodeValue?.slice?.(0,30)||caret.offsetNode?.nodeName}:null})})()`));
+      const handleArrived = selectionState.handle
+        && Math.abs(selectionState.handle.clientX - expectedHandle.clientX) <= selectionSetup.width * 0.2
+        && Math.abs(selectionState.handle.clientY - expectedHandle.clientY) <= 80;
+      if (selectionState.pager?.currentCfi && selectionState.pager.currentCfi !== selectionStartCfi && !selectionState.pager.turning && !selectionState.collapsed && handleArrived && selectionState.managedHandle?.visible) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const handleMiss = !selectionState?.handle
+      || Math.abs(selectionState.handle.clientX - expectedHandle.clientX) > selectionSetup.width * 0.2
+      || Math.abs(selectionState.handle.clientY - expectedHandle.clientY) > 80;
+    if (!selectionState?.text?.trim() || selectionState.collapsed || selectionState.pager?.currentCfi === selectionStartCfi || handleMiss || !selectionState.managedHandle?.visible) {
+      throw new Error(`Foliate cross-page selection did not reach the held handle: ${JSON.stringify({ selectionSetup, expectedHandle, selectionState })}`);
+    }
+    if (attempt === 0 && selectionSetup.direction > 0) {
+      await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const win=doc.defaultView;const held=new win.Touch({identifier:101,target:doc.body,clientX:${expectedHandle.clientX},clientY:${expectedHandle.clientY},pageX:${expectedHandle.clientX},pageY:${expectedHandle.clientY},screenX:${selectionSetup.width * 0.8},screenY:${expectedHandle.clientY}});doc.dispatchEvent(new win.TouchEvent('touchend',{touches:[],targetTouches:[],changedTouches:[held],bubbles:true,cancelable:true}));return true})()`);
+      const continuedStartCfi = selectionState.pager.currentCfi;
+      const continuedStarted = await evaluate(`(()=>{const handle=document.querySelector('.bookmark-selection-handle.visible');const handleRect=handle.getBoundingClientRect();const held=new Touch({identifier:303,target:handle,clientX:handleRect.left+22,clientY:handleRect.top+31,pageX:handleRect.left+22,pageY:handleRect.top+31,screenX:handleRect.left+22,screenY:handleRect.top+31});globalThis.__mowenSmokeHeld=held;handle.dispatchEvent(new TouchEvent('touchstart',{touches:[held],targetTouches:[held],changedTouches:[held],bubbles:true,cancelable:true}));const renderer=document.querySelector('foliate-view').renderer;if(renderer.page>=renderer.pages-2)return false;const makePage=screenX=>new Touch({identifier:404,target:document.body,clientX:screenX,clientY:${selectionSetup.height * 0.5},pageX:screenX,pageY:${selectionSetup.height * 0.5},screenX,screenY:${selectionSetup.height * 0.5}});const start=makePage(renderer.size*.8);const end=makePage(renderer.size*.2);const fire=(type,touches,changedTouches)=>document.dispatchEvent(new TouchEvent(type,{touches,targetTouches:touches,changedTouches,bubbles:true,cancelable:true}));fire('touchstart',[held,start],[start]);fire('touchmove',[held,end],[end]);fire('touchend',[held],[end]);return true})()`);
+      if (continuedStarted) {
+        const continuedDeadline = Date.now() + 15_000;
+        let continuedState;
+        while (Date.now() < continuedDeadline) {
+          continuedState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const selection=doc.getSelection();const handle=document.querySelector('.bookmark-selection-handle.visible');return JSON.stringify({pager:globalThis.__MOWEN__.pagerStatus(),text:selection?.toString?.()||'',collapsed:selection?.rangeCount?selection.getRangeAt(0).collapsed:true,handleVisible:!!handle})})()`));
+          if (continuedState.pager.currentCfi !== continuedStartCfi && !continuedState.pager.turning && !continuedState.collapsed && continuedState.handleVisible && continuedState.text.length > selectionState.text.length && continuedState.text.includes(selectionSetup.initialText)) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (
+          continuedState?.pager?.currentCfi === continuedStartCfi
+          || continuedState?.collapsed
+          || !continuedState?.handleVisible
+          || continuedState.text.length <= selectionState.text.length
+          || !continuedState.text.includes(selectionSetup.initialText)
+        ) throw new Error(`Foliate continued selection did not preserve its fixed endpoint: ${JSON.stringify({ selectionSetup, selectionState, continuedState })}`);
+        await evaluate(`(()=>{let handle=document.querySelector('.bookmark-selection-handle.visible');const held=globalThis.__mowenSmokeHeld;handle.dispatchEvent(new TouchEvent('touchend',{touches:[],targetTouches:[],changedTouches:[held],bubbles:true,cancelable:true}));handle=document.querySelector('.bookmark-selection-handle.visible');const rect=handle.getBoundingClientRect();const start=new Touch({identifier:505,target:handle,clientX:rect.left+22,clientY:rect.top+31,pageX:rect.left+22,pageY:rect.top+31,screenX:rect.left+22,screenY:rect.top+31});const moveY=Math.max(24,rect.top-41);const move=new Touch({identifier:505,target:handle,clientX:rect.left+22,clientY:moveY,pageX:rect.left+22,pageY:moveY,screenX:rect.left+22,screenY:moveY});const fire=(type,touches,changedTouches)=>handle.dispatchEvent(new TouchEvent(type,{touches,targetTouches:touches,changedTouches,bubbles:true,cancelable:true}));fire('touchstart',[start],[start]);fire('touchmove',[move],[move]);fire('touchend',[],[move]);delete globalThis.__mowenSmokeHeld;return true})()`);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        const adjustedState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const selection=doc.getSelection();return JSON.stringify({text:selection?.toString?.()||'',collapsed:selection?.rangeCount?selection.getRangeAt(0).collapsed:true,handleVisible:!!document.querySelector('.bookmark-selection-handle.visible')})})()`));
+        if (adjustedState.collapsed || !adjustedState.handleVisible || !adjustedState.text.includes(selectionSetup.initialText) || adjustedState.text === continuedState.text)
+          throw new Error(`Foliate managed selection handle was not adjustable: ${JSON.stringify({ selectionSetup, continuedState, adjustedState })}`);
+        selectionDirections.push('continued-next+handle-drag');
+      }
+    }
+    await evaluate(`globalThis.__MOWEN__.endBookmarkSelection();true`);
+    selectionDirections.push(selectionSetup.direction < 0 ? 'previous' : 'next');
+  }
+  const selectionResult = selectionDirections.length ? `${selectionDirections.join('+')} validated` : 'skipped';
   const footnote = await evaluate(`(async()=>{const view=document.querySelector('foliate-view');for(let index=0;index<view.book.sections.length;index++){const source=await view.book.sections[index].createDocument?.();if(!source?.querySelector('a[href] sup'))continue;await view.goTo(index);const live=view.renderer.getContents()[0]?.doc;const link=live?.querySelector('a[href] sup')?.closest('a[href]');if(!link)return 'missing-live-link';link.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:live.defaultView}));return 'clicked';}return 'none';})()`, 30_000);
   if (footnote === 'clicked') {
     let noteOpen = false;
@@ -139,7 +203,7 @@ try {
     }
     if (!noteOpen) throw new Error('Foliate found a footnote link but did not render its content');
   } else if (footnote !== 'none') throw new Error(`Foliate footnote test failed: ${footnote}`);
-  console.log(`Foliate smoke test passed: page-turn CFI advanced at ${state.relocate}, footnote ${footnote === 'clicked' ? 'rendered' : 'not present'}`);
+  console.log(`Foliate smoke test passed: page-turn CFI advanced at ${state.relocate}, initial custom handles validated, cross-page selection ${selectionResult}, footnote ${footnote === 'clicked' ? 'rendered' : 'not present'}`);
 } finally {
   socket?.close();
   const exited = new Promise(resolve => browser.once('exit', resolve));

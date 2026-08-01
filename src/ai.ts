@@ -15,6 +15,7 @@ function imageMime(uri: string) {
   if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
   if (extension === 'gif') return 'image/gif';
   if (extension === 'webp') return 'image/webp';
+  if (extension === 'svg') return 'image/svg+xml';
   return 'image/png';
 }
 
@@ -47,7 +48,7 @@ export async function askAI(options: {
   signal?: AbortSignal;
 }) {
   const { settings, bookTitle, bookAuthor, bookDescription, chapter, paragraphIndex, intent, question, signal } = options;
-  const radius = Math.max(1, Math.min(10, options.contextRadius ?? 2));
+  const radius = Math.max(1, Math.min(20, options.contextRadius ?? 5));
   const start = Math.max(0, paragraphIndex - radius);
   const end = Math.min(chapter.paragraphs.length, paragraphIndex + radius + 1);
   const contextImages: string[] = [];
@@ -57,7 +58,7 @@ export async function askAI(options: {
     const text = contextParagraphs[i];
     const current = start + i === paragraphIndex;
     const image = await resolveImageBlock(text);
-    if (image && image.length <= 6_000_000 && contextImages.length < 4) contextImages.push(image);
+    if (image && image.length <= 6_000_000) contextImages.push(image);
     const safeText = current && options.selectedText?.trim()
       ? options.selectedText.trim()
       : image
@@ -66,10 +67,10 @@ export async function askAI(options: {
     contextParts.push(`${current ? '【当前段】' : '【上下文】'}${safeText}`);
   }
   const context = contextParts.join('\n\n');
-  // Explicit user attachments take priority when the four-image request limit is reached.
+  // Keep every distinct image in the selected context. The model/API remains
+  // responsible for enforcing its own request-size limit if one exists.
   const allImages = [...(options.additionalImages ?? []), ...contextImages]
-    .filter((value, index, values) => value.startsWith('data:image/') && values.indexOf(value) === index)
-    .slice(0, 4);
+    .filter((value, index, values) => value.startsWith('data:image/') && values.indexOf(value) === index);
   const bookInfo = bookDescription
     ? `《${bookTitle}》，作者：${bookAuthor}。书籍简介：${bookDescription}`
     : `《${bookTitle}》，作者：${bookAuthor}。当前没有可用的 EPUB 书籍简介，请勿自行杜撰。`;

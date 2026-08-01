@@ -36,6 +36,13 @@ export type FoliateLongPress = {
   text: string;
   kind: 'text' | 'image';
   imageData?: string;
+  imageTransferId?: string;
+};
+
+export type FoliateBookmarkSelection = {
+  cfi: string;
+  sectionIndex: number;
+  text: string;
 };
 
 export type FoliateReaderHandle = {
@@ -45,6 +52,8 @@ export type FoliateReaderHandle = {
   goToFraction: (fraction: number) => void;
   previewFraction: (fraction: number) => void;
   back: () => void;
+  beginBookmarkSelection: () => void;
+  endBookmarkSelection: () => void;
 };
 
 type Props = {
@@ -58,6 +67,8 @@ type Props = {
   onLocationChange: (location: FoliateLocation) => void;
   onCenterTap: () => void;
   onLongPress: (selection: FoliateLongPress) => void;
+  onBookmarkSelection: (selection: FoliateBookmarkSelection) => void;
+  onBookmarkSelectionModeChange: (active: boolean) => void;
   onNavigationStateChange: (state: { canGoBack: boolean; noteOpen: boolean }) => void;
   onError: (message: string) => void;
 };
@@ -68,6 +79,11 @@ type HostMessage =
   | ({ type: 'relocate' } & FoliateLocation)
   | { type: 'center-tap' }
   | ({ type: 'long-press' } & FoliateLongPress)
+  | ({ type: 'bookmark-selection' } & FoliateBookmarkSelection)
+  | { type: 'bookmark-selection-mode'; active: boolean }
+  | { type: 'image-transfer-start'; transferId: string }
+  | { type: 'image-transfer-chunk'; transferId: string; chunk: string }
+  | { type: 'image-transfer-end'; transferId: string }
   | { type: 'navigation-state'; canGoBack: boolean; noteOpen: boolean }
   | { type: 'error'; message: string };
 
@@ -86,6 +102,10 @@ html,body{background:#fff}
 .page-preview{z-index:1;pointer-events:none;contain:strict}
 #page-preview-prev{transform:translate3d(-100%,0,0)}
 #page-preview-next{transform:translate3d(100%,0,0)}
+.bookmark-selection-handle{display:none;position:fixed;z-index:6;left:0;top:0;width:44px;height:52px;touch-action:none;user-select:none;-webkit-user-select:none;transform:translate3d(-100px,-100px,0)}
+.bookmark-selection-handle.visible{display:block}
+.bookmark-selection-handle::before{content:"";position:absolute;left:20px;top:5px;width:4px;height:22px;border-radius:2px;background:var(--accent)}
+.bookmark-selection-handle::after{content:"";position:absolute;left:14px;top:23px;width:16px;height:16px;border:2px solid var(--bg);border-radius:50%;background:var(--accent);box-shadow:0 1px 4px rgba(0,0,0,.28)}
 foliate-view,foliate-paginator{display:block}
 foliate-view::part(head),foliate-view::part(foot){display:none}
 #note-backdrop{display:none;position:fixed;z-index:2147483647;inset:0;background:rgba(0,0,0,.24);padding:18px;align-items:flex-end}
@@ -104,7 +124,7 @@ foliate-view::part(head),foliate-view::part(foot){display:none}
 #note-content img,#note-content svg,#note-content video{display:block;max-width:100%!important;width:auto!important;height:auto!important;margin-inline:auto}
 #note-content article a{color:var(--accent)!important}
 #note-close{position:absolute;z-index:2;right:8px;top:8px;width:34px;height:34px;border:0;border-radius:17px;background:var(--bg);color:var(--muted);font-size:22px}
-</style></head><body><div id="reader-shell"><div id="page-stage"><div id="page-preview-prev" class="page-preview"></div><div id="page-current"></div><div id="page-preview-next" class="page-preview"></div></div></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div></body></html>`;
+</style></head><body><div id="reader-shell"><div id="page-stage"><div id="page-preview-prev" class="page-preview"></div><div id="page-current"></div><div id="page-preview-next" class="page-preview"></div></div></div><div id="bookmark-selection-handle-start" class="bookmark-selection-handle" data-endpoint="start" aria-hidden="true"></div><div id="bookmark-selection-handle-end" class="bookmark-selection-handle" data-endpoint="end" aria-hidden="true"></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div></body></html>`;
 
 const FOLIATE_BRIDGE = String.raw`
 (() => {
@@ -126,6 +146,15 @@ const FOLIATE_BRIDGE = String.raw`
     scrollIntentUntil: 0,
     scrollTurn: false,
     scrollCheckFrame: 0,
+    bookmarkSelecting: false,
+    bookmarkPageTurning: false,
+    bookmarkSelectionRestore: null,
+    bookmarkSelectionPageTurn: null,
+    bookmarkSelectionModel: null,
+    bookmarkHandleController: null,
+    bookmarkHeldHandle: null,
+    bookmarkOuterPageGesture: null,
+    bookmarkPageDragOffset: 0,
   };
   const labelOf = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.zh || value['zh-CN'] || value.en || Object.values(value)[0] || '') : '';
   const flattenTOC = (items, depth = 0, output = []) => {
@@ -207,6 +236,7 @@ const FOLIATE_BRIDGE = String.raw`
     renderer.setStyles?.(styleText(config));
   };
   const resetSurfaces = () => {
+    state.bookmarkPageDragOffset = 0;
     const width = pageWidth();
     const current = currentSurface();
     const previous = previewSurface(-1);
@@ -219,6 +249,7 @@ const FOLIATE_BRIDGE = String.raw`
       else current.style.removeProperty('will-change');
     }
     for (const surface of [previous, next]) surface?.style.removeProperty('will-change');
+    if (!state.bookmarkPageTurning) state.bookmarkHandleController?.render?.();
   };
   const disposePreviews = () => {
     state.previewToken++;
@@ -320,6 +351,7 @@ const FOLIATE_BRIDGE = String.raw`
     const dir = rawDelta < 0 ? 1 : -1;
     const preview = preparedPreview(dir);
     const delta = preview ? Math.max(-width, Math.min(width, rawDelta)) : rawDelta * .16;
+    state.bookmarkPageDragOffset = delta;
     if (gesture.activeDir !== dir || gesture.activePreview !== preview) {
       if (gesture.activePreview) {
         setSurfaceX(
@@ -341,6 +373,7 @@ const FOLIATE_BRIDGE = String.raw`
       activePreview.surface.style.willChange = 'transform';
       setSurfaceX(activePreview.surface, delta + (dir > 0 ? width : -width));
     }
+    state.bookmarkHandleController?.render?.();
   };
   const flushGestureFrame = gesture => {
     if (!gesture) return;
@@ -371,8 +404,10 @@ const FOLIATE_BRIDGE = String.raw`
     state.lastTurnDir = dir;
     state.turn = turn;
     if (preview) {
-      setSurfaceX(currentSurface(), dir > 0 ? -width : width);
+      state.bookmarkPageDragOffset = dir > 0 ? -width : width;
+      setSurfaceX(currentSurface(), state.bookmarkPageDragOffset);
       setSurfaceX(preview.surface, 0);
+      state.bookmarkHandleController?.render?.();
     } else resetSurfaces();
     const navigation = dir > 0 ? state.view.next() : state.view.prev();
     Promise.resolve(navigation).catch(() => {}).finally(() => finishTurn(turn));
@@ -456,7 +491,7 @@ const FOLIATE_BRIDGE = String.raw`
       queueGestureFrame(gesture);
       return true;
     },
-    end() {
+    end(beforeTurn) {
       const gesture = state.gesture;
       if (!gesture) return { moved: false, committed: false };
       state.gesture = null;
@@ -465,14 +500,14 @@ const FOLIATE_BRIDGE = String.raw`
       const moved = gesture.axis === 'horizontal' && Math.abs(gesture.delta) >= 4;
       const projectedDelta = gesture.delta + gesture.velocity * 180;
       const dir = projectedDelta < 0 ? 1 : -1;
-      const hasTarget = !!preparedPreview(dir);
       const distanceTowardTarget = dir > 0 ? -gesture.delta : gesture.delta;
       const velocityTowardTarget = dir > 0 ? -gesture.velocity : gesture.velocity;
-      const committed = moved && hasTarget
+      let committed = moved
         && (distanceTowardTarget >= width * .16 || velocityTowardTarget >= .32);
+      if (committed && beforeTurn?.(dir) === false) committed = false;
       if (committed) turnPage(dir);
       else resetSurfaces();
-      return { moved, committed };
+      return { moved, committed, dir };
     },
     cancel() {
       const gesture = state.gesture;
@@ -524,12 +559,456 @@ const FOLIATE_BRIDGE = String.raw`
     let touch = null;
     let longPressTimer = 0;
     let suppressClickUntil = 0;
+    let selectionTimer = 0;
+    let bookmarkShortcut = false;
+    let bookmarkPageGesture = null;
+    let bookmarkSelectionTouch = null;
+    let bookmarkSelectionTimer = 0;
     const interactive = target => target?.closest?.('a[href],button,input,textarea,select,label');
     const longPressBlocked = target => target?.closest?.('button,input,textarea,select,label');
     const screenWidth = () => Math.max(1, doc.defaultView?.screen?.width || globalThis.screen?.width || state.view?.renderer?.size || 1);
     const clearLongPress = () => {
       if (longPressTimer) doc.defaultView?.clearTimeout(longPressTimer);
       longPressTimer = 0;
+    };
+    const setBookmarkSelecting = active => {
+      state.bookmarkSelecting = !!active;
+      touch = null;
+      clearLongPress();
+      if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
+      bookmarkSelectionTimer = 0;
+      bookmarkSelectionTouch = null;
+      pager.cancel();
+      if (!active) {
+        doc.getSelection?.()?.removeAllRanges?.();
+        state.bookmarkSelectionModel = null;
+        state.bookmarkHeldHandle = null;
+        state.bookmarkOuterPageGesture = null;
+        state.bookmarkHandleController?.hide?.();
+      }
+      send({ type: 'bookmark-selection-mode', active: state.bookmarkSelecting });
+    };
+    const visibleTextEdge = (visible, direction) => {
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      let lastPoint = null;
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const value = node.nodeValue || '';
+        if (!value) continue;
+        const probe = doc.createRange();
+        probe.selectNodeContents(node);
+        if (
+          probe.compareBoundaryPoints(Range.START_TO_END, visible) <= 0
+          || probe.compareBoundaryPoints(Range.END_TO_START, visible) >= 0
+        ) continue;
+        const from = node === visible.startContainer ? visible.startOffset : 0;
+        const to = node === visible.endContainer ? visible.endOffset : value.length;
+        const slice = value.slice(from, to);
+        if (direction > 0) {
+          const match = slice.match(/\S/u);
+          if (match) return { node, offset: from + (match.index || 0) + match[0].length };
+        } else {
+          for (const match of slice.matchAll(/\S/gu)) lastPoint = { node, offset: from + (match.index || 0) };
+        }
+      }
+      return lastPoint;
+    };
+    const caretPointAt = (visible, clientX, clientY, direction) => {
+      try {
+        const caret = doc.caretPositionFromPoint?.(clientX, clientY);
+        const fallbackRange = !caret ? doc.caretRangeFromPoint?.(clientX, clientY) : null;
+        const node = caret?.offsetNode || fallbackRange?.startContainer;
+        const offset = caret?.offset ?? fallbackRange?.startOffset;
+        if ((node?.nodeType === 3 || node?.nodeType === 4) && Number.isInteger(offset)) {
+          const point = doc.createRange();
+          point.setStart(node, offset);
+          point.collapse(true);
+          if (
+            point.compareBoundaryPoints(Range.START_TO_START, visible) >= 0
+            && point.compareBoundaryPoints(Range.END_TO_END, visible) <= 0
+          ) return { node, offset };
+        }
+      } catch {}
+      return visibleTextEdge(visible, direction);
+    };
+    const selectionHandlePoints = range => {
+      const rects = Array.from(range.getClientRects?.() || []).filter(rect => rect.width > 0 && rect.height > 0);
+      if (!rects.length) return null;
+      const first = rects[0];
+      const last = rects[rects.length - 1];
+      return {
+        start: { clientX: first.left, clientY: first.bottom },
+        end: { clientX: last.right, clientY: last.bottom },
+      };
+    };
+    const bookmarkModelRange = model => {
+      if (!model || model.doc !== doc || !model.fixedNode?.isConnected || !model.movingNode?.isConnected) return null;
+      try {
+        const moving = doc.createRange();
+        moving.setStart(model.movingNode, model.movingOffset);
+        moving.collapse(true);
+        const fixed = doc.createRange();
+        fixed.setStart(model.fixedNode, model.fixedOffset);
+        fixed.collapse(true);
+        const movingFirst = moving.compareBoundaryPoints(Range.START_TO_START, fixed) <= 0;
+        const range = doc.createRange();
+        if (movingFirst) {
+          range.setStart(model.movingNode, model.movingOffset);
+          range.setEnd(model.fixedNode, model.fixedOffset);
+        } else {
+          range.setStart(model.fixedNode, model.fixedOffset);
+          range.setEnd(model.movingNode, model.movingOffset);
+        }
+        model.movingStart = movingFirst;
+        return range;
+      } catch { return null; }
+    };
+    const selectionMatchesBookmarkModel = selection => {
+      const model = state.bookmarkSelectionModel;
+      if (!model || model.doc !== doc || !selection?.rangeCount) return false;
+      return selection.anchorNode === model.fixedNode
+        && selection.anchorOffset === model.fixedOffset
+        && selection.focusNode === model.movingNode
+        && selection.focusOffset === model.movingOffset;
+    };
+    const applyBookmarkSelectionModel = () => {
+      const model = state.bookmarkSelectionModel;
+      const range = bookmarkModelRange(model);
+      const selection = doc.getSelection?.();
+      if (!range || !selection) return false;
+      try {
+        if (selection.setBaseAndExtent)
+          selection.setBaseAndExtent(model.fixedNode, model.fixedOffset, model.movingNode, model.movingOffset);
+        else {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        return true;
+      } catch { return false; }
+    };
+    const rendererPageOffset = renderer => {
+      const inlineSign = renderer.getAttribute?.('dir') === 'rtl' ? -1 : 1;
+      const start = Number(renderer.start);
+      if (Number.isFinite(start)) return start - renderer.size * inlineSign;
+      return Math.max(0, Number(renderer.page || 1) - 1) * renderer.size * inlineSign;
+    };
+    const contentPointFromViewport = (clientX, clientY) => {
+      const renderer = state.view?.renderer;
+      const rect = renderer?.getBoundingClientRect?.();
+      if (!renderer || !rect || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+      if (renderer.scrollProp === 'scrollLeft')
+        return { clientX: clientX - rect.left + rendererPageOffset(renderer), clientY: clientY - rect.top };
+      return { clientX: clientX - rect.left, clientY: clientY - rect.top + rendererPageOffset(renderer) };
+    };
+    const heldHandleContentPoint = held => {
+      if (!held) return null;
+      const clientX = held.clientX + (held.caretOffsetX || 0);
+      const clientY = held.clientY + (held.caretOffsetY || 0);
+      return held.source === 'custom'
+        ? contentPointFromViewport(clientX, clientY)
+        : { clientX, clientY };
+    };
+    const viewportPointFromContent = point => {
+      const renderer = state.view?.renderer;
+      const rect = renderer?.getBoundingClientRect?.();
+      if (!renderer || !rect || !point) return null;
+      if (renderer.scrollProp === 'scrollLeft')
+        return { clientX: rect.left + point.clientX - rendererPageOffset(renderer), clientY: rect.top + point.clientY, rect };
+      return { clientX: rect.left + point.clientX, clientY: rect.top + point.clientY - rendererPageOffset(renderer), rect };
+    };
+    const hideBookmarkHandle = () => {
+      for (const handle of document.querySelectorAll('.bookmark-selection-handle'))
+        handle.classList.remove('visible');
+    };
+    const placeBookmarkHandle = (handle, point, followsPage) => {
+      const viewport = viewportPointFromContent(point);
+      const renderer = state.view?.renderer;
+      // renderer.getBoundingClientRect() already contains the current page
+      // surface transform. Unheld handles therefore need no extra offset;
+      // only cancel that transform for the handle pinned under a finger.
+      const dragOffset = followsPage ? 0 : -state.bookmarkPageDragOffset;
+      const clientX = viewport?.clientX + (renderer?.scrollProp === 'scrollLeft' ? dragOffset : 0);
+      const clientY = viewport?.clientY + (renderer?.scrollProp === 'scrollLeft' ? 0 : dragOffset);
+      if (
+        !viewport
+        || clientX < viewport.rect.left - 12
+        || clientX > viewport.rect.right + 12
+        || clientY < viewport.rect.top - 12
+        || clientY > viewport.rect.bottom + 12
+      ) {
+        handle?.classList.remove('visible');
+        return false;
+      }
+      handle.style.transform = 'translate3d(' + (clientX - 22) + 'px,' + (clientY - 8) + 'px,0)';
+      handle.classList.add('visible');
+      return true;
+    };
+    const renderBookmarkHandle = () => {
+      const model = state.bookmarkSelectionModel;
+      const range = bookmarkModelRange(model);
+      const startHandle = document.getElementById('bookmark-selection-handle-start');
+      const endHandle = document.getElementById('bookmark-selection-handle-end');
+      if (!state.bookmarkSelecting || !model?.managed || !range || !startHandle || !endHandle) {
+        hideBookmarkHandle();
+        return false;
+      }
+      const points = selectionHandlePoints(range);
+      if (!points) { hideBookmarkHandle(); return false; }
+      const heldEndpoint = state.bookmarkHeldHandle?.endpoint;
+      const startVisible = placeBookmarkHandle(startHandle, points.start, heldEndpoint !== 'start');
+      const endVisible = placeBookmarkHandle(endHandle, points.end, heldEndpoint !== 'end');
+      return startVisible || endVisible;
+    };
+    const moveBookmarkSelectionTo = point => {
+      const model = state.bookmarkSelectionModel;
+      if (!model || model.doc !== doc || !point?.node?.isConnected) return false;
+      model.movingNode = point.node;
+      model.movingOffset = point.offset;
+      if (!applyBookmarkSelectionModel()) return false;
+      renderBookmarkHandle();
+      return true;
+    };
+    const beginCustomBookmarkSelection = initialTouch => {
+      const visible = state.visibleRange;
+      const point = visible ? caretPointAt(visible, initialTouch.clientX, initialTouch.clientY, 1) : null;
+      const value = point?.node?.nodeValue || '';
+      if (!point || !value) return false;
+      let start = Math.max(0, Math.min(value.length - 1, point.offset === value.length ? point.offset - 1 : point.offset));
+      let end = Math.min(value.length, start + 1);
+      try {
+        const Segmenter = doc.defaultView?.Intl?.Segmenter;
+        if (Segmenter) {
+          const segments = new Segmenter(doc.documentElement.lang || 'zh', { granularity: 'word' }).segment(value);
+          for (const segment of segments) {
+            const from = segment.index;
+            const to = from + segment.segment.length;
+            if (start >= from && start < to && /\S/u.test(segment.segment)) {
+              start = from;
+              end = to;
+              break;
+            }
+          }
+        }
+      } catch {}
+      const fixedRange = doc.createRange();
+      fixedRange.setStart(point.node, start);
+      fixedRange.setEnd(point.node, end);
+      const points = selectionHandlePoints(fixedRange);
+      state.bookmarkSelectionModel = {
+        doc,
+        index,
+        fixedNode: point.node,
+        fixedOffset: start,
+        movingNode: point.node,
+        movingOffset: end,
+        movingStart: false,
+        managed: true,
+      };
+      applyBookmarkSelectionModel();
+      renderBookmarkHandle();
+      const endPoint = points?.end;
+      state.bookmarkHeldHandle = {
+        id: initialTouch.id,
+        source: 'native',
+        endpoint: 'end',
+        clientX: initialTouch.clientX,
+        clientY: initialTouch.clientY,
+        caretOffsetX: endPoint ? endPoint.clientX - initialTouch.clientX : 0,
+        caretOffsetY: endPoint ? endPoint.clientY - initialTouch.clientY : 0,
+      };
+      globalThis.navigator?.vibrate?.(20);
+      return true;
+    };
+    const prepareBookmarkSelectionRestore = (direction, reportedHandlePoint) => {
+      if (!state.bookmarkSelecting || state.bookmarkPageTurning) return null;
+      const model = state.bookmarkSelectionModel?.doc === doc ? state.bookmarkSelectionModel : null;
+      const selection = doc.getSelection?.();
+      if (!model && (!selection?.rangeCount || selection.getRangeAt(0).collapsed)) return null;
+      const renderer = state.view?.renderer;
+      if (!renderer || (direction < 0 ? renderer.page <= 1 : renderer.page >= renderer.pages - 2)) return null;
+      const selectedRange = model ? bookmarkModelRange(model) : selection.getRangeAt(0).cloneRange();
+      if (!selectedRange || selectedRange.collapsed) return null;
+      const handles = selectionHandlePoints(selectedRange);
+      const validReportedPoint = Number.isFinite(reportedHandlePoint?.clientX) && Number.isFinite(reportedHandlePoint?.clientY)
+        ? reportedHandlePoint
+        : null;
+      const movingStart = model ? model.movingStart : validReportedPoint && handles
+        ? Math.hypot(validReportedPoint.clientX - handles.start.clientX, validReportedPoint.clientY - handles.start.clientY)
+          <= Math.hypot(validReportedPoint.clientX - handles.end.clientX, validReportedPoint.clientY - handles.end.clientY)
+        : direction < 0;
+      const handlePoint = validReportedPoint || (movingStart ? handles?.start : handles?.end);
+      if (!handlePoint) return null;
+      const stationaryNode = model?.fixedNode || (movingStart ? selectedRange.endContainer : selectedRange.startContainer);
+      const stationaryOffset = model?.fixedOffset ?? (movingStart ? selectedRange.endOffset : selectedRange.startOffset);
+      if (!stationaryNode || stationaryNode.ownerDocument !== doc) return null;
+      const horizontal = renderer.scrollProp === 'scrollLeft';
+      const inlineSign = renderer.getAttribute?.('dir') === 'rtl' ? -1 : 1;
+      const pageDelta = direction * renderer.size * inlineSign;
+      const targetHandlePoint = {
+        clientX: handlePoint.clientX + (horizontal ? pageDelta : 0),
+        clientY: handlePoint.clientY + (horizontal ? 0 : pageDelta),
+      };
+      return async visible => {
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (!visible || visible.startContainer?.ownerDocument !== doc || !stationaryNode.isConnected) return;
+        const point = caretPointAt(visible, targetHandlePoint.clientX, targetHandlePoint.clientY, direction);
+        if (!point) return;
+        state.bookmarkSelectionModel = {
+          doc,
+          index,
+          fixedNode: stationaryNode,
+          fixedOffset: stationaryOffset,
+          movingNode: point.node,
+          movingOffset: point.offset,
+          movingStart,
+          managed: true,
+        };
+        applyBookmarkSelectionModel();
+        renderBookmarkHandle();
+        // Android ends its native handle session when the paginator scrolls.
+        // Re-assert the logical range after that stale native touch sequence
+        // settles; from this point the in-reader handle owns further edits.
+        doc.defaultView?.setTimeout(() => {
+          if (state.bookmarkSelectionModel?.doc !== doc || state.bookmarkPageTurning) return;
+          if (!selectionMatchesBookmarkModel(doc.getSelection?.())) applyBookmarkSelectionModel();
+          renderBookmarkHandle();
+        }, 120);
+        doc.defaultView?.focus?.();
+        globalThis.navigator?.vibrate?.(12);
+      };
+    };
+    const queueBookmarkSelectionRestore = (direction, handlePoint) => {
+      const run = prepareBookmarkSelectionRestore(direction, handlePoint);
+      if (!run) return false;
+      const restore = { run, timeout: 0 };
+      restore.timeout = globalThis.setTimeout(() => {
+        if (state.bookmarkSelectionRestore !== restore) return;
+        state.bookmarkSelectionRestore = null;
+        state.bookmarkPageTurning = false;
+        resetSurfaces();
+      }, 1600);
+      state.bookmarkSelectionRestore = restore;
+      state.bookmarkPageTurning = true;
+      return true;
+    };
+    const turnBookmarkSelectionPage = (direction, handlePoint) => {
+      if (!queueBookmarkSelectionRestore(direction, handlePoint)) return false;
+      if (pager.turn(direction)) return true;
+      if (state.bookmarkSelectionRestore?.timeout) globalThis.clearTimeout(state.bookmarkSelectionRestore.timeout);
+      state.bookmarkSelectionRestore = null;
+      state.bookmarkPageTurning = false;
+      return false;
+    };
+    state.bookmarkSelectionPageTurn = turnBookmarkSelectionPage;
+    const chooseBookmarkMovingEndpoint = endpoint => {
+      const model = state.bookmarkSelectionModel;
+      if (!model || model.doc !== doc) return false;
+      bookmarkModelRange(model);
+      const wantsStart = endpoint === 'start';
+      if (model.movingStart !== wantsStart) {
+        const fixedNode = model.fixedNode;
+        const fixedOffset = model.fixedOffset;
+        model.fixedNode = model.movingNode;
+        model.fixedOffset = model.movingOffset;
+        model.movingNode = fixedNode;
+        model.movingOffset = fixedOffset;
+        bookmarkModelRange(model);
+        applyBookmarkSelectionModel();
+      }
+      return true;
+    };
+    state.bookmarkHandleController = {
+      render: renderBookmarkHandle,
+      hide: hideBookmarkHandle,
+      start: event => {
+        const model = state.bookmarkSelectionModel;
+        if (!state.bookmarkSelecting || !model?.managed || model.doc !== doc) return;
+        const changed = Array.from(event.changedTouches || []);
+        const held = state.bookmarkHeldHandle;
+        if (held?.source === 'custom') {
+          const pageTouch = changed.find(point => point.identifier !== held.id);
+          if (!pageTouch || state.bookmarkOuterPageGesture) return;
+          state.bookmarkOuterPageGesture = {
+            id: pageTouch.identifier,
+            paging: pager.begin(pageTouch.screenX, pageTouch.screenY, event.timeStamp),
+          };
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        const handle = event.target?.closest?.('.bookmark-selection-handle');
+        const point = changed[0];
+        if (!handle || !point || !chooseBookmarkMovingEndpoint(handle.dataset.endpoint)) return;
+        const handleRect = handle.getBoundingClientRect();
+        state.bookmarkHeldHandle = {
+          id: point.identifier,
+          source: 'custom',
+          endpoint: handle.dataset.endpoint,
+          clientX: point.clientX,
+          clientY: point.clientY,
+          caretOffsetX: handleRect.left + 22 - point.clientX,
+          caretOffsetY: handleRect.top + 8 - point.clientY,
+        };
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        globalThis.navigator?.vibrate?.(8);
+      },
+      move: event => {
+        const held = state.bookmarkHeldHandle;
+        if (held?.source !== 'custom') return;
+        const pageGesture = state.bookmarkOuterPageGesture;
+        if (pageGesture) {
+          const pageTouch = Array.from(event.touches || []).find(point => point.identifier === pageGesture.id);
+          if (pageTouch && pageGesture.paging) pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        const touchPoint = Array.from(event.touches || []).find(point => point.identifier === held.id);
+        if (!touchPoint) return;
+        held.clientX = touchPoint.clientX;
+        held.clientY = touchPoint.clientY;
+        const contentPoint = heldHandleContentPoint(held);
+        const visible = state.visibleRange;
+        const model = state.bookmarkSelectionModel;
+        if (contentPoint && visible && model?.doc === doc) {
+          const point = caretPointAt(visible, contentPoint.clientX, contentPoint.clientY, model.movingStart ? -1 : 1);
+          if (point) moveBookmarkSelectionTo(point);
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      },
+      end: event => {
+        const held = state.bookmarkHeldHandle;
+        if (held?.source !== 'custom') return;
+        const changed = Array.from(event.changedTouches || []);
+        const pageGesture = state.bookmarkOuterPageGesture;
+        if (pageGesture && changed.some(point => point.identifier === pageGesture.id)) {
+          const pageTouch = changed.find(point => point.identifier === pageGesture.id);
+          if (pageTouch && pageGesture.paging) pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+          state.bookmarkOuterPageGesture = null;
+          if (pageGesture.paging) pager.end(direction => queueBookmarkSelectionRestore(direction, heldHandleContentPoint(held)));
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (!changed.some(point => point.identifier === held.id)) return;
+        if (state.bookmarkOuterPageGesture) pager.cancel();
+        state.bookmarkOuterPageGesture = null;
+        state.bookmarkHeldHandle = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        renderBookmarkHandle();
+      },
+      cancel: event => {
+        const held = state.bookmarkHeldHandle;
+        if (held?.source !== 'custom') return;
+        pager.cancel();
+        state.bookmarkOuterPageGesture = null;
+        state.bookmarkHeldHandle = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        renderBookmarkHandle();
+      },
     };
     const readableBlock = target => target?.closest?.('p,li,blockquote,h1,h2,h3,h4,h5,h6,dd,dt,figcaption');
     const visibleSelectionRange = range => {
@@ -538,8 +1017,8 @@ const FOLIATE_BRIDGE = String.raw`
       if (!visible || !RangeType || visible.startContainer?.ownerDocument !== doc) return range;
       try {
         if (
-          range.compareBoundaryPoints(RangeType.END_TO_START, visible) <= 0
-          || range.compareBoundaryPoints(RangeType.START_TO_END, visible) >= 0
+          range.compareBoundaryPoints(RangeType.START_TO_END, visible) <= 0
+          || range.compareBoundaryPoints(RangeType.END_TO_START, visible) >= 0
         ) return range;
         const clipped = doc.createRange();
         if (range.compareBoundaryPoints(RangeType.START_TO_START, visible) < 0)
@@ -562,12 +1041,25 @@ const FOLIATE_BRIDGE = String.raw`
     const imageDataOf = async image => {
       const src = image?.currentSrc || image?.src || '';
       if (src.startsWith('data:image/')) return src;
-      if (!src) return '';
+      if (src) {
+        try {
+          const response = await fetch(src);
+          const blob = await response.blob();
+          if (blob.type.startsWith('image/')) return await blobDataURL(blob);
+        } catch {}
+      }
+      // Some Android WebView versions cannot fetch a blob URL from a nested
+      // EPUB document even though the image is already decoded on screen.
       try {
-        const response = await fetch(src);
-        const blob = await response.blob();
-        if (!blob.type.startsWith('image/')) return '';
-        return await blobDataURL(blob);
+        await image?.decode?.();
+        const width = image?.naturalWidth || image?.width;
+        const height = image?.naturalHeight || image?.height;
+        if (!width || !height) return '';
+        const canvas = doc.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d')?.drawImage(image, 0, 0, width, height);
+        return canvas.toDataURL('image/png');
       } catch { return ''; }
     };
     const emitLongPress = async target => {
@@ -591,7 +1083,21 @@ const FOLIATE_BRIDGE = String.raw`
         const figure = image.closest?.('figure');
         const text = (image.getAttribute('alt') || figure?.querySelector?.('figcaption')?.textContent || '插图').replace(/\s+/g, ' ').trim();
         const imageData = await imageDataOf(image);
-        send({ type: 'long-press', cfi, sectionIndex: index, text, kind: 'image', imageData });
+        if (!imageData) {
+          send({ type: 'long-press', cfi, sectionIndex: index, text, kind: 'image' });
+          return true;
+        }
+        const transferId = 'image-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        // Open the AI panel immediately, then transfer the potentially large
+        // data URL in small bridge messages so Android does not drop it.
+        send({ type: 'long-press', cfi, sectionIndex: index, text, kind: 'image', imageTransferId: transferId });
+        send({ type: 'image-transfer-start', transferId });
+        const chunkSize = 128 * 1024;
+        for (let offset = 0; offset < imageData.length; offset += chunkSize) {
+          send({ type: 'image-transfer-chunk', transferId, chunk: imageData.slice(offset, offset + chunkSize) });
+          await new Promise(resolve => doc.defaultView?.setTimeout(resolve, 0));
+        }
+        send({ type: 'image-transfer-end', transferId });
         return true;
       }
       const block = readableBlock(target);
@@ -618,6 +1124,101 @@ const FOLIATE_BRIDGE = String.raw`
       else send({ type: 'center-tap' });
     };
     doc.addEventListener('touchstart', event => {
+      if (!state.bookmarkSelecting && event.touches.length === 2) {
+        bookmarkShortcut = true;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        globalThis.navigator?.vibrate?.(20);
+        setBookmarkSelecting(true);
+        return;
+      }
+      if (state.bookmarkSelecting) {
+        const selection = doc.getSelection?.();
+        const selectedRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
+        const model = state.bookmarkSelectionModel?.doc === doc ? state.bookmarkSelectionModel : null;
+        const activeRange = model ? bookmarkModelRange(model) : selectedRange;
+        if (activeRange && !activeRange.collapsed && event.changedTouches.length) {
+          const pageTouch = event.changedTouches[event.changedTouches.length - 1];
+          const handles = selectionHandlePoints(activeRange);
+          const nearestHandle = handles && (
+            Math.hypot(pageTouch.clientX - handles.start.clientX, pageTouch.clientY - handles.start.clientY)
+              <= Math.hypot(pageTouch.clientX - handles.end.clientX, pageTouch.clientY - handles.end.clientY)
+              ? handles.start
+              : handles.end
+          );
+          const nearHandle = nearestHandle
+            && Math.hypot(pageTouch.clientX - nearestHandle.clientX, pageTouch.clientY - nearestHandle.clientY) <= 56;
+          if (nearHandle && !model?.managed) {
+            state.bookmarkHeldHandle = {
+              id: pageTouch.identifier,
+              source: 'native',
+              endpoint: nearestHandle === handles.start ? 'start' : 'end',
+              clientX: pageTouch.clientX,
+              clientY: pageTouch.clientY,
+              caretOffsetX: nearestHandle.clientX - pageTouch.clientX,
+              caretOffsetY: nearestHandle.clientY - pageTouch.clientY,
+            };
+            event.stopImmediatePropagation();
+            return;
+          }
+          let held = state.bookmarkHeldHandle;
+          const handleTouch = Array.from(event.touches).find(touchPoint => touchPoint.identifier !== pageTouch.identifier);
+          if (!held && handleTouch) {
+            const nearest = handles && (
+              Math.hypot(handleTouch.clientX - handles.start.clientX, handleTouch.clientY - handles.start.clientY)
+                <= Math.hypot(handleTouch.clientX - handles.end.clientX, handleTouch.clientY - handles.end.clientY)
+                ? handles.start
+                : handles.end
+            );
+            held = state.bookmarkHeldHandle = {
+              id: handleTouch.identifier,
+              source: 'native',
+              endpoint: nearest === handles?.start ? 'start' : 'end',
+              clientX: handleTouch.clientX,
+              clientY: handleTouch.clientY,
+              caretOffsetX: nearest ? nearest.clientX - handleTouch.clientX : 0,
+              caretOffsetY: nearest ? nearest.clientY - handleTouch.clientY : 0,
+            };
+          }
+          if (handleTouch && held?.source === 'native' && handleTouch.identifier === held.id) {
+            held.clientX = handleTouch.clientX;
+            held.clientY = handleTouch.clientY;
+          }
+          const heldPoint = heldHandleContentPoint(held);
+          bookmarkPageGesture = {
+            id: pageTouch.identifier,
+            handleClientX: heldPoint?.clientX,
+            handleClientY: heldPoint?.clientY,
+            adjustsSelection: !!heldPoint,
+            paging: pager.begin(pageTouch.screenX, pageTouch.screenY, event.timeStamp),
+          };
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if ((!activeRange || activeRange.collapsed) && event.touches.length === 1 && event.changedTouches.length) {
+          const point = event.changedTouches[0];
+          bookmarkSelectionTouch = {
+            id: point.identifier,
+            clientX: point.clientX,
+            clientY: point.clientY,
+            startX: point.clientX,
+            startY: point.clientY,
+          };
+          if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
+          bookmarkSelectionTimer = doc.defaultView?.setTimeout(() => {
+            bookmarkSelectionTimer = 0;
+            const initialTouch = bookmarkSelectionTouch;
+            if (!initialTouch || state.bookmarkSelectionModel) return;
+            if (beginCustomBookmarkSelection(initialTouch)) bookmarkSelectionTouch = null;
+          }, 460) || 0;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        event.stopImmediatePropagation();
+        return;
+      }
       if (event.touches.length !== 1) return;
       doc.getSelection?.()?.removeAllRanges?.();
       const point = event.touches[0];
@@ -652,6 +1253,57 @@ const FOLIATE_BRIDGE = String.raw`
       }
     }, { passive: false, capture: true });
     doc.addEventListener('touchmove', event => {
+      if (bookmarkPageGesture) {
+        const pageTouch = Array.from(event.touches).find(point => point.identifier === bookmarkPageGesture.id);
+        const handleTouch = Array.from(event.touches).find(point => point.identifier !== bookmarkPageGesture.id);
+        if (pageTouch && bookmarkPageGesture.paging)
+          pager.move(pageTouch.screenX, pageTouch.screenY, event.timeStamp);
+        if (handleTouch && state.bookmarkHeldHandle?.source !== 'custom') {
+          const held = state.bookmarkHeldHandle;
+          if (held?.source === 'native' && held.id === handleTouch.identifier) {
+            held.clientX = handleTouch.clientX;
+            held.clientY = handleTouch.clientY;
+          }
+          const heldPoint = heldHandleContentPoint(held);
+          if (heldPoint) {
+            bookmarkPageGesture.handleClientX = heldPoint.clientX;
+            bookmarkPageGesture.handleClientY = heldPoint.clientY;
+          }
+        } else if (state.bookmarkHeldHandle?.source === 'custom') {
+          const heldPoint = heldHandleContentPoint(state.bookmarkHeldHandle);
+          if (heldPoint) {
+            bookmarkPageGesture.handleClientX = heldPoint.clientX;
+            bookmarkPageGesture.handleClientY = heldPoint.clientY;
+          }
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (bookmarkShortcut) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+      if (bookmarkSelectionTouch) {
+        const point = Array.from(event.touches).find(point => point.identifier === bookmarkSelectionTouch.id);
+        if (point && Math.hypot(point.clientX - bookmarkSelectionTouch.startX, point.clientY - bookmarkSelectionTouch.startY) > 8) {
+          if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
+          bookmarkSelectionTimer = 0;
+          bookmarkSelectionTouch = null;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (state.bookmarkSelecting) {
+        const held = state.bookmarkHeldHandle;
+        const handleTouch = held?.source === 'native'
+          ? Array.from(event.touches).find(point => point.identifier === held.id)
+          : null;
+        if (handleTouch && state.bookmarkHeldHandle?.source !== 'custom') {
+          held.clientX = handleTouch.clientX;
+          held.clientY = handleTouch.clientY;
+        }
+        event.stopImmediatePropagation();
+        return;
+      }
       if (!touch || event.touches.length !== 1) return;
       const point = event.touches[0];
       const moveThreshold = state.config?.prefs.readingMode === 'paged' ? 4 : 9;
@@ -674,6 +1326,71 @@ const FOLIATE_BRIDGE = String.raw`
       }
     }, { passive: false, capture: true });
     doc.addEventListener('touchend', event => {
+      if (bookmarkPageGesture && Array.from(event.changedTouches).some(point => point.identifier === bookmarkPageGesture.id)) {
+        const gesture = bookmarkPageGesture;
+        const endedTouch = Array.from(event.changedTouches).find(point => point.identifier === gesture.id);
+        if (endedTouch && gesture.paging)
+          pager.move(endedTouch.screenX, endedTouch.screenY, event.timeStamp);
+        const handleTouch = Array.from(event.touches).find(point => point.identifier !== gesture.id);
+        if (handleTouch && state.bookmarkHeldHandle?.source !== 'custom') {
+          const held = state.bookmarkHeldHandle;
+          if (held?.source === 'native' && held.id === handleTouch.identifier) {
+            held.clientX = handleTouch.clientX;
+            held.clientY = handleTouch.clientY;
+          }
+          const heldPoint = heldHandleContentPoint(held);
+          if (heldPoint) {
+            gesture.handleClientX = heldPoint.clientX;
+            gesture.handleClientY = heldPoint.clientY;
+          }
+        } else if (state.bookmarkHeldHandle?.source === 'custom') {
+          const heldPoint = heldHandleContentPoint(state.bookmarkHeldHandle);
+          if (heldPoint) {
+            gesture.handleClientX = heldPoint.clientX;
+            gesture.handleClientY = heldPoint.clientY;
+          }
+        }
+        bookmarkPageGesture = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!gesture.paging) return;
+        const handlePoint = Number.isFinite(gesture.handleClientX) && Number.isFinite(gesture.handleClientY)
+          ? { clientX: gesture.handleClientX, clientY: gesture.handleClientY }
+          : null;
+        if (gesture.adjustsSelection)
+          pager.end(direction => queueBookmarkSelectionRestore(direction, handlePoint));
+        else pager.end();
+        return;
+      }
+      if (bookmarkSelectionTouch && Array.from(event.changedTouches).some(point => point.identifier === bookmarkSelectionTouch.id)) {
+        if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
+        bookmarkSelectionTimer = 0;
+        bookmarkSelectionTouch = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (bookmarkShortcut) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!event.touches.length) bookmarkShortcut = false;
+        return;
+      }
+      if (state.bookmarkSelecting) {
+        const held = state.bookmarkHeldHandle;
+        if (held?.source === 'native' && Array.from(event.changedTouches).some(point => point.identifier === held.id)) {
+          state.bookmarkHeldHandle = null;
+          if (state.bookmarkSelectionModel?.doc === doc) {
+            event.preventDefault();
+            doc.defaultView?.requestAnimationFrame(() => {
+              if (!selectionMatchesBookmarkModel(doc.getSelection?.())) applyBookmarkSelectionModel();
+              renderBookmarkHandle();
+            });
+          }
+        }
+        event.stopImmediatePropagation();
+        return;
+      }
       clearLongPress();
       if (!touch) return;
       const finished = touch;
@@ -698,7 +1415,36 @@ const FOLIATE_BRIDGE = String.raw`
       suppressClickUntil = Date.now() + 500;
       doc.defaultView?.requestAnimationFrame(() => doc.defaultView?.requestAnimationFrame(() => handleTap(finished.screenX)));
     }, { passive: false, capture: true });
-    doc.addEventListener('touchcancel', () => {
+    doc.addEventListener('touchcancel', event => {
+      if (bookmarkPageGesture && Array.from(event.changedTouches).some(point => point.identifier === bookmarkPageGesture.id)) {
+        pager.cancel();
+        bookmarkPageGesture = null;
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (bookmarkSelectionTouch) {
+        if (bookmarkSelectionTimer) doc.defaultView?.clearTimeout(bookmarkSelectionTimer);
+        bookmarkSelectionTimer = 0;
+        bookmarkSelectionTouch = null;
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (bookmarkShortcut) {
+        bookmarkShortcut = false;
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (state.bookmarkSelecting) {
+        const held = state.bookmarkHeldHandle;
+        if (held?.source === 'native' && Array.from(event.changedTouches).some(point => point.identifier === held.id))
+          state.bookmarkHeldHandle = null;
+        if (state.bookmarkSelectionModel?.doc === doc) {
+          applyBookmarkSelectionModel();
+          renderBookmarkHandle();
+        }
+        event.stopImmediatePropagation();
+        return;
+      }
       clearLongPress();
       touch = null;
       state.scrollIntentDir = 0;
@@ -706,16 +1452,69 @@ const FOLIATE_BRIDGE = String.raw`
       pager.cancel();
     }, { passive: true, capture: true });
     doc.addEventListener('click', event => {
+      if (state.bookmarkSelecting) return;
       if (Date.now() < suppressClickUntil || event.defaultPrevented || interactive(event.target)) return;
       const x = event.screenX || (((event.clientX % (state.view?.renderer?.size || screenWidth())) + screenWidth()) % screenWidth());
       handleTap(x);
     }, false);
+    doc.addEventListener('selectstart', event => {
+      if (state.bookmarkSelecting) event.preventDefault();
+    }, { capture: true });
     doc.addEventListener('contextmenu', event => {
+      if (state.bookmarkSelecting) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       if (longPressBlocked(event.target)) return;
       event.preventDefault();
       suppressClickUntil = Date.now() + 700;
       void emitLongPress(event.target);
     }, false);
+    doc.addEventListener('selectionchange', () => {
+      if (!state.bookmarkSelecting) return;
+      if (selectionTimer) doc.defaultView?.clearTimeout(selectionTimer);
+      selectionTimer = doc.defaultView?.setTimeout(() => {
+        selectionTimer = 0;
+        let selection = doc.getSelection?.();
+        let model = state.bookmarkSelectionModel;
+        if (!model && selection?.rangeCount && !selection.getRangeAt(0).collapsed) {
+          const range = selection.getRangeAt(0);
+          model = state.bookmarkSelectionModel = {
+            doc,
+            index,
+            fixedNode: range.startContainer,
+            fixedOffset: range.startOffset,
+            movingNode: range.endContainer,
+            movingOffset: range.endOffset,
+            movingStart: false,
+            managed: true,
+          };
+          applyBookmarkSelectionModel();
+          renderBookmarkHandle();
+          selection = doc.getSelection?.();
+        }
+        if (model?.managed && model.doc === doc && !selectionMatchesBookmarkModel(selection)) {
+          applyBookmarkSelectionModel();
+          renderBookmarkHandle();
+          selection = doc.getSelection?.();
+        }
+        if (!selection?.rangeCount) {
+          send({ type: 'bookmark-selection', cfi: '', sectionIndex: index, text: '' });
+          return;
+        }
+        const range = selection.getRangeAt(0);
+        const text = selection.toString().replace(/\s+/g, ' ').trim();
+        if (range.collapsed || !text) {
+          send({ type: 'bookmark-selection', cfi: '', sectionIndex: index, text: '' });
+          return;
+        }
+        let cfi = '';
+        try { cfi = state.view?.getCFI?.(index, range) || ''; } catch {}
+        if (cfi) send({ type: 'bookmark-selection', cfi, sectionIndex: index, text: text.slice(0, 4000) });
+        renderBookmarkHandle();
+      }, 120) || 0;
+    });
   };
   const isNoteLink = anchor => {
     if (!anchor?.getAttribute) return false;
@@ -829,6 +1628,11 @@ const FOLIATE_BRIDGE = String.raw`
   const start = () => {
     document.getElementById('note-close').addEventListener('click', closeNote);
     document.getElementById('note-backdrop').addEventListener('click', event => { if (event.target.id === 'note-backdrop') closeNote(); });
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+      document.addEventListener(type, event => {
+        state.bookmarkHandleController?.[type.slice(5)]?.(event);
+      }, { passive: false, capture: true });
+    }
     globalThis.addEventListener('resize', () => {
       state.pageWidth = 0;
       if (state.resizeFrame) globalThis.cancelAnimationFrame(state.resizeFrame);
@@ -836,6 +1640,7 @@ const FOLIATE_BRIDGE = String.raw`
         state.resizeFrame = 0;
         pager.cancel();
         measurePageWidth();
+        state.bookmarkHandleController?.render?.();
       });
     }, { passive: true });
     send({ type: 'host-ready' });
@@ -871,6 +1676,18 @@ const FOLIATE_BRIDGE = String.raw`
           totalPositions: Math.max(1, location.total ?? 1),
           title: labelOf(d.tocItem?.label),
         });
+        const bookmarkRestore = state.bookmarkSelectionRestore;
+        if (bookmarkRestore) {
+          state.bookmarkSelectionRestore = null;
+          if (bookmarkRestore.timeout) globalThis.clearTimeout(bookmarkRestore.timeout);
+          Promise.resolve(bookmarkRestore.run(state.visibleRange)).catch(error => {
+            console.warn('[MOWEN_SELECTION_PAGE]', error?.message || String(error));
+          }).finally(() => {
+            state.bookmarkPageTurning = false;
+            state.bookmarkHandleController?.render?.();
+          });
+        } else if (state.bookmarkSelecting)
+          globalThis.requestAnimationFrame(() => state.bookmarkHandleController?.render?.());
       });
       setupFootnotes(view);
       view.history?.addEventListener?.('index-change', emitNavigationState);
@@ -903,6 +1720,37 @@ const FOLIATE_BRIDGE = String.raw`
     goToFraction: fraction => state.view?.goToFraction(Math.max(0, Math.min(1, Number(fraction)))),
     previewFraction,
     back,
+    turnBookmarkSelectionPage: (direction, point) => {
+      const rect = state.view?.renderer?.getBoundingClientRect?.() || currentSurface()?.getBoundingClientRect?.();
+      const clientX = Number(point?.clientX);
+      const clientY = Number(point?.clientY);
+      const contentPoint = rect && Number.isFinite(clientX) && Number.isFinite(clientY)
+        ? { clientX: clientX - rect.left, clientY: clientY - rect.top }
+        : null;
+      return state.bookmarkSelectionPageTurn?.(direction < 0 ? -1 : 1, contentPoint) || false;
+    },
+    beginBookmarkSelection: () => {
+      state.bookmarkSelecting = true;
+      state.bookmarkSelectionModel = null;
+      state.bookmarkHeldHandle = null;
+      state.bookmarkOuterPageGesture = null;
+      state.bookmarkHandleController?.hide?.();
+      pager.cancel();
+      send({ type: 'bookmark-selection-mode', active: true });
+    },
+    endBookmarkSelection: () => {
+      state.bookmarkSelecting = false;
+      pager.cancel();
+      if (state.bookmarkSelectionRestore?.timeout) globalThis.clearTimeout(state.bookmarkSelectionRestore.timeout);
+      state.bookmarkSelectionRestore = null;
+      state.bookmarkPageTurning = false;
+      state.bookmarkSelectionModel = null;
+      state.bookmarkHeldHandle = null;
+      state.bookmarkOuterPageGesture = null;
+      state.bookmarkHandleController?.hide?.();
+      state.view?.renderer?.getContents?.().forEach(({ doc }) => doc.getSelection?.()?.removeAllRanges?.());
+      send({ type: 'bookmark-selection-mode', active: false });
+    },
     pagerStatus: () => ({
       currentCfi: state.currentCfi,
       previousReady: !!preparedPreview(-1),
@@ -924,6 +1772,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
   const started = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const imageTransfers = useRef(new Map<string, { selection: FoliateLongPress; chunks: string[] }>()).current;
   const config = { prefs: props.prefs, palette: props.palette };
 
   const call = useCallback((method: string, ...args: unknown[]) => {
@@ -937,6 +1786,8 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     goToFraction: (fraction) => call('goToFraction', fraction),
     previewFraction: (fraction) => call('previewFraction', fraction),
     back: () => call('back'),
+    beginBookmarkSelection: () => call('beginBookmarkSelection'),
+    endBookmarkSelection: () => call('endBookmarkSelection'),
   }), [call]);
 
   useEffect(() => {
@@ -974,7 +1825,38 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     if (message.type === 'book-ready') { setLoading(false); props.onReady(message.toc); return; }
     if (message.type === 'relocate') { props.onLocationChange(message); return; }
     if (message.type === 'center-tap') { props.onCenterTap(); return; }
-    if (message.type === 'long-press') { props.onLongPress(message); return; }
+    if (message.type === 'long-press') {
+      props.onLongPress(message);
+      if (message.kind === 'image' && message.imageTransferId) {
+        imageTransfers.set(message.imageTransferId, { selection: message, chunks: [] });
+      }
+      return;
+    }
+    if (message.type === 'bookmark-selection') {
+      if (typeof message.cfi === 'string' && typeof message.text === 'string' && Number.isInteger(message.sectionIndex) && message.sectionIndex >= 0)
+        props.onBookmarkSelection(message);
+      return;
+    }
+    if (message.type === 'bookmark-selection-mode') {
+      if (typeof message.active === 'boolean') props.onBookmarkSelectionModeChange(message.active);
+      return;
+    }
+    if (message.type === 'image-transfer-start') {
+      if (!imageTransfers.has(message.transferId)) imageTransfers.set(message.transferId, { selection: { cfi: '', sectionIndex: 0, text: '插图', kind: 'image', imageTransferId: message.transferId }, chunks: [] });
+      return;
+    }
+    if (message.type === 'image-transfer-chunk') {
+      imageTransfers.get(message.transferId)?.chunks.push(message.chunk);
+      return;
+    }
+    if (message.type === 'image-transfer-end') {
+      const transfer = imageTransfers.get(message.transferId);
+      if (transfer) {
+        imageTransfers.delete(message.transferId);
+        props.onLongPress({ ...transfer.selection, imageData: transfer.chunks.join('') });
+      }
+      return;
+    }
     if (message.type === 'navigation-state') {
       props.onNavigationStateChange({ canGoBack: message.canGoBack, noteOpen: message.noteOpen });
       return;
@@ -984,7 +1866,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
       setLoading(false);
       props.onError(message.message);
     }
-  }, [props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onNavigationStateChange, props.onReady, sendBook]);
+  }, [props.onBookmarkSelection, props.onBookmarkSelectionModeChange, props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onNavigationStateChange, props.onReady, sendBook]);
 
   return (
     <View style={[styles.container, { backgroundColor: props.palette.bg }]}>

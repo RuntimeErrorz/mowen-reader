@@ -1,6 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
+import JSZip from 'jszip';
+import { parseEpub } from './epub';
 import { AIConversation, AISettings, Book, Bookmark, BookSummary, ReaderPrefs } from './types';
 
 const LIBRARY_KEY = 'mowen:library:v1';
@@ -8,6 +11,7 @@ const PREFS_KEY = 'mowen:prefs:v1';
 const AI_KEY = 'mowen:ai:v1';
 const AI_SECRET_KEY = 'mowen.ai-secret.v1';
 const BOOKMARKS_KEY = 'mowen:bookmarks:v1';
+const BOOK_FORMAT_VERSION = 5;
 const BOOK_DIR = `${FileSystem.documentDirectory}mowen-books/`;
 const CONVERSATIONS_FILE = `${FileSystem.documentDirectory}mowen-ai-conversations.json`;
 const bookCache = new Map<string, Book>();
@@ -143,6 +147,15 @@ export async function saveBook(book: Book): Promise<Book> {
       epubUri = persistedEpub;
     }
   }
+  let epubZip: JSZip | null = null;
+  const epubSourceUri = epubUri;
+  if (epubSourceUri) {
+    try {
+      epubZip = await JSZip.loadAsync(await new File(epubSourceUri).arrayBuffer());
+    } catch {
+      epubZip = null;
+    }
+  }
   const chapters = await mapConcurrent(book.chapters, 4, async (chapter, chapterIndex) => {
     const paragraphs: string[] = [];
     for (let paragraphIndex = 0; paragraphIndex < chapter.paragraphs.length; paragraphIndex++) {
@@ -156,6 +169,23 @@ export async function saveBook(book: Book): Promise<Book> {
           paragraphs.push(`[[MOWEN_IMAGE_FILE:${existingFile[1]}${dimensions ? `|${dimensions.width}|${dimensions.height}` : ''}]]`);
         } catch { paragraphs.push(paragraph); }
         continue;
+      }
+      const epubImage = paragraph.match(/^\[\[MOWEN_IMAGE_EPUB:([^|\]]+)(?:\|([^\]]+))?\]\]$/);
+      if (epubImage && epubZip) {
+        const epubPath = epubImage[1];
+        const mime = epubImage[2] || 'image/png';
+        try {
+          const base64 = await epubZip.file(epubPath)?.async('base64');
+          if (base64) {
+            const path = `${assetsDir}${chapterIndex}-${paragraphIndex}.${imageExtension(mime)}`;
+            await FileSystem.writeAsStringAsync(path, base64, { encoding: FileSystem.EncodingType.Base64 });
+            const dimensions = imageDimensions(base64);
+            paragraphs.push(`[[MOWEN_IMAGE_FILE:${path}${dimensions ? `|${dimensions.width}|${dimensions.height}` : ''}]]`);
+            continue;
+          }
+        } catch {
+          // Keep the marker below if the source image cannot be extracted.
+        }
       }
       const raw = paragraph.match(/^\[\[MOWEN_IMAGE_DATA:(data:image\/[\s\S]+)\]\]$/)?.[1];
       const parsed = dataImage(raw);
@@ -185,7 +215,7 @@ export async function saveBook(book: Book): Promise<Book> {
     cover: normalized.cover,
     epubUri: normalized.epubUri,
     addedAt: normalized.addedAt,
-    formatVersion: 4,
+    formatVersion: BOOK_FORMAT_VERSION,
     chapterFiles: chapters.map((_chapter, index) => `chapters/${index}.json`),
   };
   await FileSystem.writeAsStringAsync(`${root}metadata.json`, JSON.stringify(metadata));
@@ -204,7 +234,23 @@ export async function loadBook(id: string): Promise<Book | null> {
     const chapters = await Promise.all(metadata.chapterFiles.map(async (relativePath) => JSON.parse(await FileSystem.readAsStringAsync(`${root}${relativePath}`))));
     const { formatVersion: _formatVersion, chapterFiles: _chapterFiles, ...bookMetadata } = metadata;
     const book: Book = { ...bookMetadata, chapters };
-    if (metadata.formatVersion < 4) return saveBook(book);
+    const formatVersion = Number.isFinite(metadata.formatVersion) ? metadata.formatVersion : 0;
+    if (formatVersion < BOOK_FORMAT_VERSION && book.epubUri) {
+      try {
+        // Older versions replaced EPUB images with a text placeholder. Reparse the
+        // original publication once so nearby image context can be recovered.
+        const reparsed = await parseEpub(book.epubUri, book.title);
+        return saveBook({
+          ...reparsed,
+          id: book.id,
+          addedAt: book.addedAt,
+          cover: book.cover ?? reparsed.cover,
+        });
+      } catch {
+        // Fall through and at least migrate the existing chapter files.
+      }
+    }
+    if (formatVersion < BOOK_FORMAT_VERSION) return saveBook(book);
     rememberBook(book);
     return book;
   }

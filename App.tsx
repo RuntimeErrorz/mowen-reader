@@ -28,7 +28,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import Markdown from 'react-native-markdown-display';
 import Slider from '@react-native-community/slider';
-import { FoliateLocation, FoliateLongPress, FoliateReader, FoliateReaderHandle, FoliateTOCItem } from './src/FoliateReader';
+import { FoliateBookmarkSelection, FoliateLocation, FoliateLongPress, FoliateReader, FoliateReaderHandle, FoliateTOCItem } from './src/FoliateReader';
 import { askAI, AIIntent } from './src/ai';
 import { parseEpub } from './src/epub';
 import {
@@ -359,6 +359,8 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   const [tocOpen, setTocOpen] = useState(false);
   const [typeOpen, setTypeOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [bookmarkSelecting, setBookmarkSelecting] = useState(false);
+  const [bookmarkSelection, setBookmarkSelection] = useState<FoliateBookmarkSelection | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiSelection, setAiSelection] = useState('');
   const [aiImage, setAiImage] = useState('');
@@ -452,7 +454,6 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   const exactProgress = dragProgress ?? location?.progression ?? props.summary.progress;
   const currentToc = Math.max(0, location?.title ? toc.findIndex((item) => item.label.replace(/\s+/g, ' ').trim() === location.title?.replace(/\s+/g, ' ').trim()) : location?.sectionIndex ?? 0);
   const chapter = props.book.chapters[chapterIndex] ?? props.book.chapters[0];
-  const currentBookmark = props.bookmarks.find((item) => item.locator?.type === 'application/epub+cfi' && item.locator.href === location?.cfi);
 
   const toggleChrome = () => {
     if (progressDragging.current) return;
@@ -504,29 +505,49 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     const link = toc.find((item) => item.label.replace(/\s+/g, ' ').trim() === title) ?? toc[index];
     if (link?.href) readerRef.current?.goTo(link.href);
   };
-  const toggleBookmark = () => {
-    if (currentBookmark) {
-      props.onBookmarksChange(props.bookmarks.filter((item) => item.id !== currentBookmark.id));
-      return;
+  const beginBookmarkSelection = () => {
+    setBookmarksOpen(false);
+    setBookmarkSelection(null);
+    setBookmarkSelecting(true);
+    setChromeVisible(false);
+    chromeAnim.setValue(0);
+    readerRef.current?.beginBookmarkSelection();
+  };
+  const cancelBookmarkSelection = () => {
+    readerRef.current?.endBookmarkSelection();
+    setBookmarkSelecting(false);
+    setBookmarkSelection(null);
+  };
+  const saveBookmarkSelection = () => {
+    if (!bookmarkSelection?.cfi || !bookmarkSelection.text.trim()) return;
+    let nextChapter = Math.min(props.book.chapters.length - 1, Math.max(0, bookmarkSelection.sectionIndex));
+    let nextParagraph = 0;
+    const needle = bookmarkSelection.text.replace(/\s+/g, '').slice(0, 80);
+    const candidates = [nextChapter, ...props.book.chapters.map((_item, index) => index).filter((index) => index !== nextChapter)];
+    for (const candidate of candidates) {
+      const found = props.book.chapters[candidate]?.paragraphs.findIndex((paragraph) => paragraph.replace(/\[\[MOWEN_[^\]]+\]\]/g, '').replace(/\s+/g, '').includes(needle)) ?? -1;
+      if (found >= 0) { nextChapter = candidate; nextParagraph = found; break; }
     }
-    if (!location?.cfi) return;
-    const excerpt = chapter.paragraphs[paragraphIndex]?.replace(/\[\[MOWEN_[^\]]+\]\]/g, '〔内容〕').slice(0, 120) || chapter.title;
+    const selectedChapter = props.book.chapters[nextChapter] ?? chapter;
+    const excerpt = bookmarkSelection.text.replace(/\s+/g, ' ').trim().slice(0, 240);
     const bookmarkLocator: EpubLocator = {
-      href: location.cfi,
+      href: bookmarkSelection.cfi,
       type: 'application/epub+cfi',
-      title: location.title,
-      locations: { progression: location.sectionProgression, position: location.position, totalProgression: location.progression },
+      title: location?.title,
+      locations: { progression: location?.sectionProgression ?? 0, position: location?.position, totalProgression: location?.progression },
+      text: { highlight: excerpt },
     };
     props.onBookmarksChange([...props.bookmarks, {
       id: `bookmark-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       bookId: props.book.id,
-      chapterIndex,
-      paragraphIndex,
-      chapterTitle: chapter.title,
+      chapterIndex: nextChapter,
+      paragraphIndex: nextParagraph,
+      chapterTitle: selectedChapter.title,
       excerpt,
       locator: bookmarkLocator,
       createdAt: Date.now(),
     }]);
+    cancelBookmarkSelection();
   };
   const openConversation = (conversation: AIConversation) => {
     if (conversation.locator?.type === 'application/epub+cfi' && conversation.locator.href) {
@@ -546,6 +567,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   }, []);
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (bookmarkSelecting) { cancelBookmarkSelection(); return true; }
       if (readerNavigation.noteOpen) {
         readerRef.current?.back();
         return true;
@@ -568,7 +590,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
       return true;
     });
     return () => subscription.remove();
-  }, [activeHistory, aiOpen, bookmarksOpen, chromeAnim, chromeVisible, closeConversation, props.onBack, readerNavigation.canGoBack, readerNavigation.noteOpen, tocOpen, typeOpen]);
+  }, [activeHistory, aiOpen, bookmarkSelecting, bookmarksOpen, chromeAnim, chromeVisible, closeConversation, props.onBack, readerNavigation.canGoBack, readerNavigation.noteOpen, tocOpen, typeOpen]);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.reader, { backgroundColor: palette.bg }]}>
@@ -585,6 +607,12 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         onLocationChange={handleLocationChange}
         onCenterTap={toggleChrome}
         onLongPress={handleLongPress}
+        onBookmarkSelection={setBookmarkSelection}
+        onBookmarkSelectionModeChange={(active) => {
+          setBookmarkSelecting(active);
+          if (!active) setBookmarkSelection(null);
+          if (active) { setChromeVisible(false); chromeAnim.setValue(0); }
+        }}
         onNavigationStateChange={setReaderNavigation}
         onError={(message) => Alert.alert('Foliate 无法打开 EPUB', message)}
       />
@@ -610,6 +638,12 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
           onProgressMove={moveProgressDrag}
           onProgressEnd={finishProgressDrag}
         />
+      )}
+      {bookmarkSelecting && !readerNavigation.noteOpen && (
+        <View style={styles.bookmarkSelectionActions}>
+          <Pressable accessibilityLabel="取消摘录" onPress={cancelBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.control, borderColor: palette.line }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.muted }]}>取消</Text></Pressable>
+          <Pressable accessibilityLabel="保存摘录书签" disabled={!bookmarkSelection?.cfi} onPress={saveBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.accent, borderColor: palette.accent }, !bookmarkSelection?.cfi && { opacity: 0.4 }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.onAccent }]}>标记</Text></Pressable>
+        </View>
       )}
       {dragProgress !== null && !readerNavigation.noteOpen && (
         <View pointerEvents="none" style={[styles.liveProgressCard, { backgroundColor: palette.bar, borderColor: palette.line }]}>
@@ -642,10 +676,9 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
       <BookmarksModal
         visible={bookmarksOpen}
         bookmarks={props.bookmarks}
-        currentBookmark={currentBookmark}
         chapterTitle={chapter.title}
         paragraphIndex={paragraphIndex}
-        onToggleCurrent={toggleBookmark}
+        onStartSelection={beginBookmarkSelection}
         onChoose={(bookmark) => { setBookmarksOpen(false); if (bookmark.locator?.type === 'application/epub+cfi') readerRef.current?.goTo(bookmark.locator.href); else goToChapter(bookmark.chapterIndex); }}
         onDelete={(bookmark) => props.onBookmarksChange(props.bookmarks.filter((item) => item.id !== bookmark.id))}
         conversations={props.conversations}
@@ -709,10 +742,9 @@ function BookmarksModal(props: {
   palette: ReaderPalette;
   visible: boolean;
   bookmarks: Bookmark[];
-  currentBookmark?: Bookmark;
   chapterTitle: string;
   paragraphIndex: number;
-  onToggleCurrent: () => void;
+  onStartSelection: () => void;
   onChoose: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
   conversations: AIConversation[];
@@ -735,9 +767,9 @@ function BookmarksModal(props: {
           <Pressable onPress={() => setTab('conversations')} style={[styles.marginTab, tab === 'conversations' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'conversations' ? props.palette.accent : props.palette.muted }, tab === 'conversations' && styles.marginTabTextActive]}>AI 对话 {props.conversations.length}</Text></Pressable>
         </View>
         {tab === 'bookmarks' ? <>
-        <Pressable onPress={props.onToggleCurrent} style={[styles.currentBookmarkAction, { backgroundColor: props.currentBookmark ? props.palette.surfaceAlt : props.palette.focus, borderColor: props.palette.line }]}>
-          <View style={[styles.bookmarkActionIcon, { backgroundColor: props.palette.control }]}><Ionicons name={props.currentBookmark ? 'bookmark' : 'bookmark-outline'} size={19} color={props.currentBookmark ? C.ember : props.palette.accent} /></View>
-          <View style={{ flex: 1 }}><Text style={[styles.currentBookmarkTitle, { color: props.palette.text }]}>{props.currentBookmark ? '移除当前位置' : '添加当前位置'}</Text><Text numberOfLines={1} style={[styles.currentBookmarkMeta, { color: props.palette.muted }]}>{props.chapterTitle} · 位置 {props.paragraphIndex + 1}</Text></View>
+        <Pressable onPress={props.onStartSelection} style={[styles.currentBookmarkAction, { backgroundColor: props.palette.focus, borderColor: props.palette.line }]}>
+          <View style={[styles.bookmarkActionIcon, { backgroundColor: props.palette.control }]}><Ionicons name="text-outline" size={19} color={props.palette.accent} /></View>
+          <View style={{ flex: 1 }}><Text style={[styles.currentBookmarkTitle, { color: props.palette.text }]}>摘录文字</Text><Text numberOfLines={1} style={[styles.currentBookmarkMeta, { color: props.palette.muted }]}>按住选区手柄，另一指左右滑动翻页</Text></View>
         </Pressable>
         <FlatList
           data={ordered}
@@ -1113,8 +1145,10 @@ function AIPanel(props: {
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [contextRadius, setContextRadius] = useState(2);
+  const [contextRadius, setContextRadius] = useState(5);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [conversationMessages, setConversationMessages] = useState<AIMessage[]>([]);
+  const questionInputRef = useRef<TextInput>(null);
   const controller = useRef<AbortController | null>(null);
   const messagesRef = useRef<AIMessage[]>([]);
   const sessionId = useRef('');
@@ -1128,7 +1162,6 @@ function AIPanel(props: {
     }
     return () => controller.current?.abort();
   }, [props.visible, props.paragraphIndex]);
-
   const run = async (intent: AIIntent) => {
     if (!props.settings.apiKey.trim()) { setError('先配置模型接口，墨问才知道该去哪里思考。'); return; }
     setLoading(true); setError(''); setAnswer('');
@@ -1175,56 +1208,109 @@ function AIPanel(props: {
       if ((e as Error).name !== 'AbortError') setError(e instanceof Error ? e.message : '暂时无法连接模型');
     } finally { setLoading(false); }
   };
+  const fillPreset = (prompt: string) => {
+    setQuestion(prompt);
+    setAnswer('');
+    setError('');
+    requestAnimationFrame(() => questionInputRef.current?.focus());
+  };
+  const openImagePreview = (uri: string) => setPreviewImage(uri);
   const excerpt = props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
   const excerptIsImage = !!props.selectedImage || !!getImageData(excerpt);
   const start = Math.max(0, props.paragraphIndex - contextRadius);
   const end = Math.min(props.chapter.paragraphs.length, props.paragraphIndex + contextRadius + 1);
-  const bookImageCount = props.chapter.paragraphs.slice(start, end).filter((item) => !!getImageData(item)).length + (props.selectedImage ? 1 : 0);
+  const contextImageUris = useMemo(() => {
+    const values: string[] = [];
+    if (props.selectedImage) values.push(props.selectedImage);
+    for (let index = start; index < end; index++) {
+      // When an image was long-pressed, the selected image is already supplied
+      // separately; don't show/count the same image twice from the chapter marker.
+      if (props.selectedImage && index === props.paragraphIndex) continue;
+      const uri = getImageData(props.chapter.paragraphs[index]);
+      if (uri) values.push(uri);
+    }
+    return values.filter((value, index, all) => all.indexOf(value) === index);
+  }, [end, props.chapter.paragraphs, props.paragraphIndex, props.selectedImage, start]);
+  const bookImageCount = contextImageUris.length;
+  const hasConversationContent = loading || !!answer;
+  if (!props.visible) return null;
 
   return (
-    <Modal visible={props.visible} transparent animationType="slide" onRequestClose={props.onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalRoot}>
-        <DraggableSheet visible={props.visible} onClose={props.onClose} palette={props.palette} style={styles.aiSheet}>
+    <View style={styles.aiOverlayRoot}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalRoot}>
+        <DraggableSheet
+          visible={props.visible}
+          onClose={props.onClose}
+          palette={props.palette}
+          animateIn
+          fillBelow
+          style={[styles.aiSheet, hasConversationContent && styles.aiSheetExpanded]}
+        >
           <View style={styles.aiHeader}>
             <View style={styles.aiTitleRow}><View style={[styles.miniSpark, { backgroundColor: props.palette.accent }]}><Ionicons name="sparkles" size={15} color={props.palette.onAccent} /></View><Text style={[styles.aiTitle, { color: props.palette.text }]}>理解此处</Text></View>
             <Pressable onPress={props.onClose} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
           </View>
-          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <ScrollView style={styles.aiScroll} contentContainerStyle={styles.aiScrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <View style={[styles.contextCard, { backgroundColor: props.palette.surfaceAlt, borderLeftColor: props.palette.accent }]}>
               <View style={styles.contextLabelRow}><Text style={[styles.contextLabel, { color: props.palette.accent }]}>正在阅读 · 位置 {props.paragraphIndex + 1}</Text><Text style={[styles.contextRange, { color: props.palette.muted }]}>{bookImageCount} 张图片</Text></View>
               <Text numberOfLines={3} style={[styles.contextText, { color: props.palette.text }]}>{excerptIsImage ? '当前是一幅插图，AI 将结合图片内容理解。' : excerpt}</Text>
+              {!!contextImageUris.length && <ScrollView horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.contextImages}>
+                {contextImageUris.map((uri, index) => <Pressable key={`${index}-${uri.slice(0, 32)}`} accessibilityLabel={`放大查看上下文图片 ${index + 1}`} onPress={() => openImagePreview(uri)} style={({ pressed }) => [styles.contextImagePress, pressed && styles.pressed]}>
+                  <Image source={{ uri }} style={[styles.contextImage, { borderColor: props.palette.line }]} />
+                  <View style={[styles.contextImageIndex, { backgroundColor: props.palette.scrim }]}><Text style={[styles.contextImageIndexText, { color: props.palette.onAccent }]}>{index + 1}</Text></View>
+                </Pressable>)}
+              </ScrollView>}
             </View>
-            <Text style={[styles.contextControlLabel, { color: props.palette.muted }]}>上下文范围</Text>
-            <View style={styles.contextOptions}>
-              {[1, 2, 5, 10].map((radius) => (
-                <Pressable
-                  key={radius}
-                  onPress={() => { setContextRadius(radius); setAnswer(''); }}
-                  style={[styles.contextOption, { backgroundColor: contextRadius === radius ? props.palette.focus : props.palette.control, borderColor: contextRadius === radius ? props.palette.accent : props.palette.line }]}
-                >
-                  <Text style={[styles.contextOptionText, { color: contextRadius === radius ? props.palette.accent : props.palette.muted }, contextRadius === radius && styles.contextOptionTextActive]}>前后 {radius}</Text>
-                </Pressable>
-              ))}
+            <View style={styles.contextSliderHead}>
+              <Text style={[styles.contextControlLabel, { color: props.palette.muted }]}>上下文范围</Text>
+              <Text style={[styles.contextSliderValue, { color: props.palette.accent }]}>前后 {contextRadius} 个内容块</Text>
+            </View>
+            <Slider
+              value={contextRadius}
+              minimumValue={1}
+              maximumValue={20}
+              step={1}
+              onValueChange={(value) => { setContextRadius(Math.round(value)); setAnswer(''); }}
+              minimumTrackTintColor={props.palette.accent}
+              maximumTrackTintColor={props.palette.line}
+              thumbTintColor={props.palette.accent}
+              style={styles.contextSlider}
+            />
+            <View style={styles.contextSliderMeta}>
+              <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>近</Text>
+              <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>远 · 最多前后 20 个内容块</Text>
             </View>
             {!answer && !loading && (
               <View style={styles.intentGrid}>
-                <IntentButton palette={props.palette} title="解释这段" onPress={() => run('explain')} />
-                <IntentButton palette={props.palette} title="联系上下文" onPress={() => run('thread')} />
-                <IntentButton palette={props.palette} title="说简单点" onPress={() => run('simple')} />
+                <IntentButton palette={props.palette} title="解释这段" onPress={() => fillPreset('请解释这段内容的核心意思、关键概念和隐含逻辑。')} />
+                <IntentButton palette={props.palette} title="联系上下文" onPress={() => fillPreset('请结合前后文，说明这段内容在本章论证中的作用。')} />
+                <IntentButton palette={props.palette} title="说简单点" onPress={() => fillPreset('请用更直白的中文改写这段内容，并举一个贴切的小例子。')} />
               </View>
             )}
             {loading && <View style={styles.thinking}><View style={[styles.thinkingOrb, { backgroundColor: props.palette.accent }]}><ActivityIndicator color={props.palette.onAccent} /></View><View><Text style={[styles.thinkingTitle, { color: props.palette.text }]}>沿着上下文阅读…</Text><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>只发送当前段落附近的内容</Text></View></View>}
             {!!answer && <View style={[styles.answerCard, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}><Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text><Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown><Pressable onPress={() => { setAnswer(''); setQuestion(''); }} style={styles.askAgain}><Ionicons name="refresh" size={15} color={props.palette.accent} /><Text style={[styles.askAgainText, { color: props.palette.accent }]}>换一种问法</Text></Pressable></View>}
             {!!error && <View style={[styles.errorCard, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="information-circle-outline" size={19} color={C.ember} /><Text style={[styles.errorText, { color: props.palette.text }]}>{error}</Text>{!props.settings.apiKey && <Pressable onPress={props.onSettings}><Text style={[styles.errorLink, { color: props.palette.accent }]}>去配置</Text></Pressable>}</View>}
+          </ScrollView>
+          <View style={[styles.aiComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
             <View style={[styles.questionBox, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-              <TextInput value={question} onChangeText={setQuestion} placeholder="也可以直接问一个问题…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
+              <TextInput ref={questionInputRef} value={question} onChangeText={setQuestion} placeholder="也可以直接问一个问题…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
               <Pressable disabled={!question.trim() || loading} onPress={() => run('question')} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
             </View>
             <Text style={[styles.privacyNote, { color: props.palette.muted }]}>发送范围：书籍信息、所选上下文及范围内插图</Text>
-          </ScrollView>
+          </View>
         </DraggableSheet>
+        {!!previewImage && <View style={[StyleSheet.absoluteFill, styles.imagePreviewRoot, { backgroundColor: props.palette.scrim }]}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewImage(null)} />
+          <View style={[styles.imagePreviewCard, { backgroundColor: props.palette.surface, borderColor: props.palette.line }]}>
+            {previewImage && <Image source={{ uri: previewImage }} resizeMode="contain" style={styles.imagePreviewImage} />}
+            <View style={[styles.imagePreviewFooter, { borderTopColor: props.palette.line }]}>
+              <Text style={[styles.imagePreviewLabel, { color: props.palette.muted }]}>上下文图片 {Math.max(0, contextImageUris.indexOf(previewImage ?? '') + 1)} / {contextImageUris.length}</Text>
+              <Pressable accessibilityLabel="关闭图片预览" onPress={() => setPreviewImage(null)} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
+            </View>
+          </View>
+        </View>}
       </KeyboardAvoidingView>
-    </Modal>
+    </View>
   );
 }
 
@@ -1267,15 +1353,22 @@ function DraggableSheet(props: {
   visible: boolean;
   onClose: () => void;
   palette?: ReaderPalette;
+  animateIn?: boolean;
+  fillBelow?: boolean;
   style?: React.ComponentProps<typeof Animated.View>['style'];
   children: React.ReactNode;
 }) {
   const palette = props.palette ?? getReaderPalette('paper');
-  const translateY = useRef(new Animated.Value(0)).current;
   const { height: windowHeight } = useWindowDimensions();
+  const translateY = useRef(new Animated.Value(props.animateIn ? windowHeight : 0)).current;
   useEffect(() => {
-    if (props.visible) translateY.setValue(0);
-  }, [props.visible, translateY]);
+    if (!props.visible) return;
+    if (!props.animateIn) { translateY.setValue(0); return; }
+    const frame = requestAnimationFrame(() => {
+      Animated.timing(translateY, { toValue: 0, duration: 190, useNativeDriver: true }).start();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [props.animateIn, props.visible, translateY]);
   const panResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 2 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
@@ -1299,6 +1392,7 @@ function DraggableSheet(props: {
   return <>
     <Animated.View style={[styles.scrim, { backgroundColor: palette.scrim, opacity: scrimOpacity }]}><Pressable style={StyleSheet.absoluteFill} onPress={props.onClose} /></Animated.View>
     <Animated.View style={[styles.sheet, { backgroundColor: palette.surface }, props.style, { transform: [{ translateY }] }]}>
+      {props.fillBelow && <View pointerEvents="none" style={[styles.sheetFillBelow, { height: windowHeight, backgroundColor: palette.surface }]} />}
       <View style={styles.dragHandleZone} {...panResponder.panHandlers}><SheetHandle color={palette.line} /></View>
       {props.children}
     </Animated.View>
@@ -1330,10 +1424,10 @@ function themedMarkdownStyles(palette: ReaderPalette) {
 }
 
 function getReaderPalette(theme: ReaderPrefs['theme']) {
-  if (theme === 'night') return { bg: '#142428', bar: '#1A2E32', surface: '#1B3034', surfaceAlt: '#223A3E', control: '#263F43', text: '#E3E9E3', muted: '#9AAEAD', line: '#385055', accent: '#83C6C0', focus: '#294549', scrim: 'rgba(3,10,12,.76)', onAccent: '#102629' };
-  if (theme === 'mist') return { bg: '#DCE8E6', bar: '#E6EFED', surface: '#EDF3F1', surfaceAlt: '#D5E3E0', control: '#F5F8F6', text: '#183034', muted: '#607779', line: '#B8CAC6', accent: '#367F7C', focus: '#C9DEDA', scrim: 'rgba(13,35,38,.54)', onAccent: '#F7FBF8' };
-  if (theme === 'wheat') return { bg: '#F0DEB7', bar: '#F6E8CB', surface: '#F8EBCF', surfaceAlt: '#EAD6AC', control: '#FFF5DE', text: '#211A12', muted: '#776851', line: '#D3BA8D', accent: '#A95D2D', focus: '#E5C994', scrim: 'rgba(40,27,13,.55)', onAccent: '#FFF8E9' };
-  return { bg: C.paper, bar: '#EEF0EB', surface: '#F4F6F1', surfaceAlt: '#E3E9E3', control: '#FAFBF8', text: C.text, muted: C.muted, line: C.line, accent: '#397F7B', focus: '#DCE8E3', scrim: 'rgba(4,18,21,.58)', onAccent: '#F8FAF6' };
+  if (theme === 'night') return { bg: '#142428', bar: '#1A2E32', surface: '#1B3034', surfaceAlt: '#223A3E', control: '#263F43', text: '#E3E9E3', muted: '#9AAEAD', line: '#385055', accent: '#8CB9B2', focus: '#2C4347', scrim: 'rgba(3,10,12,.76)', onAccent: '#102629' };
+  if (theme === 'mist') return { bg: '#DCE8E6', bar: '#E6EFED', surface: '#EDF3F1', surfaceAlt: '#D5E3E0', control: '#F5F8F6', text: '#183034', muted: '#607779', line: '#B8CAC6', accent: '#466E82', focus: '#CBDCE2', scrim: 'rgba(13,35,38,.54)', onAccent: '#F7FBF8' };
+  if (theme === 'wheat') return { bg: '#F0DEB7', bar: '#F6E8CB', surface: '#F8EBCF', surfaceAlt: '#EAD6AC', control: '#FFF5DE', text: '#211A12', muted: '#776851', line: '#D3BA8D', accent: '#97552F', focus: '#E4C99D', scrim: 'rgba(40,27,13,.55)', onAccent: '#FFF8E9' };
+  return { bg: C.paper, bar: '#EEF0EB', surface: '#F4F6F1', surfaceAlt: '#E3E9E3', control: '#FAFBF8', text: C.text, muted: C.muted, line: C.line, accent: '#34756F', focus: '#DCE8E3', scrim: 'rgba(4,18,21,.58)', onAccent: '#F8FAF6' };
 }
 
 const styles = StyleSheet.create({
@@ -1390,8 +1484,10 @@ const styles = StyleSheet.create({
   liveProgressFill: { height: 3 },
   liveProgressHint: { fontSize: 9, textAlign: 'center', marginTop: 9 },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
+  aiOverlayRoot: { ...StyleSheet.absoluteFillObject, zIndex: 100, elevation: 100 },
   scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(4,18,21,.58)' },
   sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '82%', minHeight: 350, backgroundColor: '#F3F5F0', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 22 },
+  sheetFillBelow: { position: 'absolute', top: '100%', left: 0, right: 0 },
   handle: { width: 34, height: 4, borderRadius: 2, backgroundColor: '#C2CAC5', alignSelf: 'center', marginTop: 10, marginBottom: 8 },
   sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12 },
   sheetEyebrow: { color: C.sea, fontSize: 9, letterSpacing: 2, fontWeight: '800' },
@@ -1409,10 +1505,13 @@ const styles = StyleSheet.create({
   marginTab: { flex: 1, height: 39, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
   marginTabActive: { borderBottomColor: C.sea },
   marginTabText: { color: C.muted, fontSize: 11 },
-  marginTabTextActive: { color: '#347975', fontWeight: '800' },
+  marginTabTextActive: { fontWeight: '800' },
   currentBookmarkAction: { minHeight: 68, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#E4ECE8', borderWidth: 1, borderColor: '#C8D9D2', paddingHorizontal: 13, marginTop: 4, marginBottom: 12 },
   currentBookmarkActionRemove: { backgroundColor: '#F1E7DF', borderColor: '#E3CDBF' },
   bookmarkActionIcon: { width: 38, height: 42, borderTopLeftRadius: 19, borderTopRightRadius: 5, borderBottomRightRadius: 19, borderBottomLeftRadius: 5, backgroundColor: '#F4F7F3', alignItems: 'center', justifyContent: 'center' },
+  bookmarkSelectionActions: { position: 'absolute', alignSelf: 'center', bottom: 10, flexDirection: 'row', gap: 8 },
+  bookmarkSelectionButton: { minWidth: 52, height: 44, borderWidth: 1, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center', borderRadius: 12, elevation: 8 },
+  bookmarkSelectionButtonText: { fontSize: 11, fontWeight: '800' },
   bookmarkActionIconRemove: { backgroundColor: '#F8F1EB' },
   currentBookmarkTitle: { color: C.text, fontSize: 13, fontWeight: '800' },
   currentBookmarkMeta: { color: C.muted, fontSize: 10, marginTop: 4 },
@@ -1487,13 +1586,16 @@ const styles = StyleSheet.create({
   appearanceOption: { flex: 1, minHeight: 38, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 7 },
   appearanceOptionActive: { borderColor: C.sea, backgroundColor: '#E0ECE8' },
   appearanceOptionText: { color: C.muted, fontSize: 11 },
-  appearanceOptionTextActive: { color: '#347975', fontWeight: '800' },
+  appearanceOptionTextActive: { fontWeight: '800' },
   themeRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 7 },
   themeChoice: { flex: 1, borderWidth: 1, borderColor: C.line, padding: 8, alignItems: 'center' },
   themeChoiceActive: { borderColor: C.sea, backgroundColor: '#E7EFEB' },
   themeSwatch: { height: 35, alignSelf: 'stretch', borderWidth: StyleSheet.hairlineWidth, borderColor: '#B9C1BC' },
   themeName: { color: C.text, fontSize: 11, marginTop: 7 },
-  aiSheet: { height: '82%', maxHeight: '82%' },
+  aiSheet: { minHeight: 0, maxHeight: '82%' },
+  aiSheetExpanded: { height: '82%' },
+  aiScroll: { flexShrink: 1 },
+  aiScrollContent: { paddingBottom: 12 },
   aiHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 9 },
   aiTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   miniSpark: { width: 30, height: 34, borderTopLeftRadius: 15, borderTopRightRadius: 5, borderBottomLeftRadius: 5, borderBottomRightRadius: 15, backgroundColor: C.sea, alignItems: 'center', justifyContent: 'center' },
@@ -1503,12 +1605,17 @@ const styles = StyleSheet.create({
   contextLabel: { color: '#397873', fontSize: 10, fontWeight: '700' },
   contextRange: { color: '#819091', fontSize: 9 },
   contextText: { color: '#4E6264', fontFamily: 'serif', fontSize: 13, lineHeight: 21 },
+  contextImages: { gap: 8, paddingTop: 10, paddingBottom: 2 },
+  contextImagePress: { width: 62, height: 62 },
+  contextImage: { width: 62, height: 62, borderWidth: 1, backgroundColor: '#DDE5DF', resizeMode: 'cover' },
+  contextImageIndex: { position: 'absolute', right: 3, bottom: 3, minWidth: 16, height: 16, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
+  contextImageIndexText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
   contextControlLabel: { color: C.muted, fontSize: 10, fontWeight: '700', marginTop: 14, marginBottom: 7 },
-  contextOptions: { flexDirection: 'row', gap: 7 },
-  contextOption: { flex: 1, height: 34, borderWidth: 1, borderColor: '#CCD5CE', backgroundColor: C.white, alignItems: 'center', justifyContent: 'center' },
-  contextOptionActive: { borderColor: C.sea, backgroundColor: '#E0ECE8' },
-  contextOptionText: { color: C.muted, fontSize: 10 },
-  contextOptionTextActive: { color: '#347975', fontWeight: '800' },
+  contextSliderHead: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 14 },
+  contextSliderValue: { fontSize: 11, fontWeight: '800', marginBottom: 7 },
+  contextSlider: { width: '100%', height: 36, marginTop: -1 },
+  contextSliderMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: -4 },
+  contextSliderHint: { fontSize: 9 },
   intentGrid: { flexDirection: 'row', gap: 7, marginTop: 12 },
   intentButton: { flex: 1, height: 38, backgroundColor: C.white, borderWidth: 1, borderColor: '#D0D9D3', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
   intentTitle: { color: C.text, fontSize: 11, fontWeight: '700' },
@@ -1524,11 +1631,17 @@ const styles = StyleSheet.create({
   errorCard: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F5E8DF', padding: 12, marginTop: 12 },
   errorText: { flex: 1, color: '#745543', fontSize: 11, lineHeight: 17 },
   errorLink: { color: '#A35E3D', fontSize: 11, fontWeight: '800' },
-  questionBox: { minHeight: 50, borderWidth: 1, borderColor: '#CAD3CC', backgroundColor: C.white, flexDirection: 'row', alignItems: 'center', marginTop: 16, marginBottom: 7 },
+  aiComposer: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 5 },
+  questionBox: { minHeight: 50, borderWidth: 1, borderColor: '#CAD3CC', backgroundColor: C.white, flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
   questionInput: { flex: 1, color: C.text, fontSize: 13, paddingHorizontal: 14, paddingVertical: 10, maxHeight: 90 },
   sendButton: { width: 34, height: 34, borderRadius: 17, marginRight: 7, backgroundColor: C.sea, alignItems: 'center', justifyContent: 'center' },
   sendDisabled: { backgroundColor: '#B8C3BF' },
-  privacyNote: { color: '#8A9899', fontSize: 9, textAlign: 'center', marginBottom: 30 },
+  privacyNote: { color: '#8A9899', fontSize: 9, textAlign: 'center', marginBottom: 4 },
+  imagePreviewRoot: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 18 },
+  imagePreviewCard: { width: '100%', maxWidth: 520, height: '82%', maxHeight: 476, borderWidth: 1, overflow: 'hidden', elevation: 18, shadowColor: '#071315', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.35, shadowRadius: 22 },
+  imagePreviewImage: { width: '100%', flex: 1, minHeight: 0, backgroundColor: '#0A1719' },
+  imagePreviewFooter: { minHeight: 56, borderTopWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 16, paddingRight: 10 },
+  imagePreviewLabel: { fontSize: 11, fontWeight: '700' },
   settingsPage: { flex: 1, backgroundColor: C.paper },
   settingsTop: { height: 62, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
   settingsTopTitle: { color: C.text, fontSize: 16, fontWeight: '700' },

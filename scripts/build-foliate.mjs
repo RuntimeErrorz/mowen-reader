@@ -35,14 +35,30 @@ const bundle = await rollup({
         }`;
         const delayedUnlock = `        if (shouldGo || !this.hasAttribute('animated')) await wait(100)`;
         const immediateUnlock = `        if (shouldGo && this.hasAttribute('animated')) await wait(100)`;
+        const defaultSelectionPaging = `        const checkPointerSelection = debounce((range, sel) => {
+            if (!sel.rangeCount) return
+            const selRange = sel.getRangeAt(0)
+            const backward = selectionIsBackward(sel)
+            if (backward && selRange.compareBoundaryPoints(Range.START_TO_START, range) < 0)
+                this.prev()
+            else if (!backward && selRange.compareBoundaryPoints(Range.END_TO_END, range) > 0)
+                this.next()
+        }, 700)`;
+        const manualSelectionPaging = `        const checkPointerSelection = () => {}`;
         if (!code.includes(boxedViewport)) {
           throw new Error('Foliate paginator layout changed; update Mowen page-surface patch');
         }
         if (!code.includes(delayedUnlock)) {
           throw new Error('Foliate paginator navigation changed; update Mowen page-turn patch');
         }
+        if (!code.includes(defaultSelectionPaging)) {
+          throw new Error('Foliate paginator selection changed; update Mowen selection-boundary patch');
+        }
         return {
-          code: code.replace(boxedViewport, fullPageViewport).replace(delayedUnlock, immediateUnlock),
+          code: code
+            .replace(boxedViewport, fullPageViewport)
+            .replace(delayedUnlock, immediateUnlock)
+            .replace(defaultSelectionPaging, manualSelectionPaging),
           map: null,
         };
       },
