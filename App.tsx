@@ -4,8 +4,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AISettingsModal } from './src/components/AISettingsModal';
+import { DataBackupModal } from './src/components/DataBackupModal';
 import { LibraryScreen, Splash } from './src/components/LibraryScreen';
 import { ReaderScreen } from './src/components/reader/ReaderScreen';
+import { BackupSelection, createBackupFile, inspectBackup, restoreBackupFile, saveBackupFile } from './src/backup';
 import { parseEpub } from './src/epub';
 import {
   defaultAI,
@@ -41,6 +43,7 @@ export default function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [conversations, setConversations] = useState<AIConversation[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dataOpen, setDataOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [openingBookId, setOpeningBookId] = useState<string | null>(null);
 
@@ -137,13 +140,50 @@ export default function App() {
     ]);
   };
 
+  const exportBackup = async () => {
+    const result = await createBackupFile({ library, prefs, aiSettings, bookmarks, conversations });
+    return saveBackupFile(result);
+  };
+
+  const pickBackup = async (): Promise<BackupSelection | null> => {
+    const result = await DocumentPicker.getDocumentAsync({ type: ['application/zip', 'application/octet-stream'], copyToCacheDirectory: true });
+    if (result.canceled || !result.assets[0]) return null;
+    const asset = result.assets[0];
+    const inspected = await inspectBackup(asset.uri, asset.name);
+    return { uri: asset.uri, fileName: asset.name, preview: inspected.preview };
+  };
+
+  const restoreBackup = async (selection: BackupSelection) => {
+    const result = await restoreBackupFile(selection.uri, selection.fileName, {
+      currentLibrary: library,
+      currentPrefs: prefs,
+      currentAISettings: aiSettings,
+      currentBookmarks: bookmarks,
+      currentConversations: conversations,
+      saveBook,
+    });
+    setLibrary(result.library);
+    setPrefs(result.prefs);
+    setAiSettings(result.aiSettings);
+    setBookmarks(result.bookmarks);
+    setConversations(result.conversations);
+    await Promise.all([
+      saveLibrary(result.library),
+      savePrefs(result.prefs),
+      saveAISettings(result.aiSettings),
+      saveBookmarks(result.bookmarks),
+      saveConversations(result.conversations),
+    ]);
+    return result;
+  };
+
   if (!ready) return <Splash />;
 
   return (
     <SafeAreaProvider>
       <View style={styles.app}>
         {screen === 'library' ? (
-          <LibraryScreen library={library} palette={getReaderPalette(prefs.theme)} importing={importing} openingBookId={openingBookId} onImport={importBook} onOpen={openBook} onRemove={removeBook} onSettings={() => setSettingsOpen(true)} />
+          <LibraryScreen library={library} palette={getReaderPalette(prefs.theme)} importing={importing} openingBookId={openingBookId} onImport={importBook} onOpen={openBook} onRemove={removeBook} onSettings={() => setSettingsOpen(true)} onData={() => setDataOpen(true)} />
         ) : book ? (
           <ReaderScreen
             book={book}
@@ -175,6 +215,7 @@ export default function App() {
           />
         ) : null}
         <AISettingsModal visible={settingsOpen} value={aiSettings} palette={getReaderPalette(prefs.theme)} onClose={() => setSettingsOpen(false)} onAutoSave={async (value) => { setAiSettings(value); await saveAISettings(value); }} onSave={async (value) => { setAiSettings(value); await saveAISettings(value); setSettingsOpen(false); }} />
+        <DataBackupModal visible={dataOpen} palette={getReaderPalette(prefs.theme)} bookCount={library.length} bookmarkCount={bookmarks.length} messageCount={conversations.reduce((sum, item) => sum + item.messages.length, 0)} onClose={() => setDataOpen(false)} onExport={exportBackup} onPickBackup={pickBackup} onRestore={restoreBackup} />
       </View>
     </SafeAreaProvider>
   );

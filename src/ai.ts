@@ -3,6 +3,10 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 export type AIIntent = 'explain' | 'thread' | 'simple' | 'question';
 
+type AIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail: 'auto' } };
+
 const intentText: Record<AIIntent, string> = {
   explain: '解释这段话真正表达的意思、关键概念和隐含逻辑。',
   thread: '结合前后文，说明这段话在本章论证中起什么作用。',
@@ -42,58 +46,6 @@ function extractDeltaContent(value: unknown): string {
   }).join('');
 }
 
-async function readStreamingResponse(response: Response, onDelta?: (delta: string) => void) {
-  const reader = response.body?.getReader();
-  if (!reader) return null;
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let raw = '';
-  let mode: 'sse' | 'json' | null = null;
-  let content = '';
-  const consumeLine = (line: string) => {
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
-    if (!data || data === '[DONE]') return;
-    try {
-      const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
-      const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
-      if (delta) { content += delta; onDelta?.(delta); }
-    } catch { }
-  };
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    raw += chunk;
-    if (!mode) {
-      const start = raw.trimStart();
-      if (start.startsWith('data:')) {
-        mode = 'sse';
-      } else if (start.startsWith('{') || start.startsWith('[')) {
-        mode = 'json';
-      }
-    }
-    if (mode === 'sse') {
-      buffer += chunk;
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      lines.forEach(consumeLine);
-    }
-  }
-  const tail = decoder.decode();
-  raw += tail;
-  if (mode === 'sse') {
-    buffer += tail;
-    consumeLine(buffer);
-    return content.trim();
-  }
-  if (mode === 'json') {
-    const data = JSON.parse(raw) as { choices?: Array<{ message?: { content?: unknown } }> };
-    return extractDeltaContent(data.choices?.[0]?.message?.content).trim();
-  }
-  return null;
-}
-
 function createSseParser(onDelta?: (delta: string) => void) {
   let buffer = '';
   let content = '';
@@ -119,6 +71,21 @@ function createSseParser(onDelta?: (delta: string) => void) {
       return content.trim();
     },
   };
+}
+
+function parseCustomRequestParams(value: string): Record<string, unknown> {
+  const trimmed = value.trim();
+  if (!trimmed) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error('自定义请求参数不是有效的 JSON，请输入一个 JSON 对象。');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('自定义请求参数必须是 JSON 对象，例如 {"reasoning_effort":"medium"}。');
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function requestWithXhr(url: string, apiKey: string, requestBody: Record<string, unknown>, signal: AbortSignal | undefined, onDelta?: (delta: string) => void): Promise<string> {
@@ -212,72 +179,30 @@ export async function askAI(options: {
     ? `《${bookTitle}》，作者：${bookAuthor}。书籍简介：${bookDescription}`
     : `《${bookTitle}》，作者：${bookAuthor}。当前没有可用的 EPUB 书籍简介，请勿自行杜撰。`;
   const prompt = `书籍信息：${bookInfo}\n当前章节：${chapter.title}\n上下文范围：当前位置前后各 ${radius} 个内容块\n\n${context}\n\n任务：${intentText[intent]}${question ? `\n读者的问题：${question}` : ''}${allImages.length ? `\n随附 ${allImages.length} 张图片，请结合图片中的图表、文字或视觉关系回答。` : ''}`;
-  const userContent: any = allImages.length
+  const userContent: string | AIContentPart[] = allImages.length
     ? [
         { type: 'text', text: prompt },
-        ...allImages.map((url) => ({ type: 'image_url', image_url: { url, detail: 'auto' } })),
+        ...allImages.map((url): AIContentPart => ({ type: 'image_url', image_url: { url, detail: 'auto' } })),
       ]
     : prompt;
   const baseUrl = settings.baseUrl.replace(/\/$/, '');
+  const customRequestParams = parseCustomRequestParams(typeof settings.customRequestParams === 'string' ? settings.customRequestParams : '');
+  const systemPrompt = [
+    '你是墨问里的通用阅读与问答助手。优先利用提供的书籍上下文，但这不是回答边界。',
+    '如果问题涉及书外知识、最新数据、事实核查、计算、图片或图表，请直接尽力回答，不要因为信息不在书中就拒答。',
+    '清楚区分“原文说了什么”和“基于一般知识的补充”；对可能随时间变化的事实说明时效性，无法验证时诚实说明，不要编造。',
+    '不要展示内部思考过程。除非用户要求，先给结论，再给必要说明，使用简洁的 Markdown。',
+  ].join('\n');
   const requestBody: Record<string, unknown> = {
+    ...customRequestParams,
     model: settings.model,
-    temperature: 0.35,
+    temperature: customRequestParams.temperature ?? 0.35,
     stream: true,
     messages: [
-      { role: 'system', content: 'You are an EPUB reading assistant. Answer using the provided book context.' },
+      { role: 'system', content: systemPrompt },
       ...(options.history ?? []),
       { role: 'user', content: userContent },
     ],
   };
   return requestWithXhr(`${baseUrl}/chat/completions`, settings.apiKey, requestBody, signal, onDelta);
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
-    body: JSON.stringify({
-      model: settings.model,
-      temperature: 0.35,
-      stream: true,
-      messages: [
-        {
-          role: 'system',
-          content: '你是嵌在 EPUB 阅读器页边的阅读助手。你的职责是帮助读者回到原文并理解它，而不是炫耀知识。只依据所给文本判断；先给一句核心解释，再分点说明。语言简洁、准确，不超过 450 个中文字符。可以使用简洁的 Markdown，包括粗体、列表、引用和必要的小标题。',
-        },
-        ...(options.history ?? []),
-        {
-          role: 'user',
-          content: userContent,
-        },
-      ],
-    }),
-    signal,
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`模型接口返回 ${response.status}${body ? `：${body.slice(0, 120)}` : ''}`);
-  }
-  const streamed = await readStreamingResponse(response, onDelta);
-  if (streamed !== null) {
-    if (!streamed) throw new Error('妯″瀷娌℃湁杩斿洖鍙樉绀虹殑鍐呭');
-    return streamed as string;
-  }
-  const body = await response.text();
-  const bodyStart = body.trimStart();
-  if (bodyStart.startsWith('data:')) {
-    let content = '';
-    for (const line of body.split(/\r?\n/)) {
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === '[DONE]') continue;
-      try {
-        const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
-        const delta = extractDeltaContent(chunk.choices?.[0]?.delta?.content);
-        if (delta) { content += delta; onDelta?.(delta); }
-      } catch { }
-    }
-    if (content.trim()) return content.trim();
-  }
-  const data = JSON.parse(body) as { choices?: Array<{ message?: { content?: unknown } }> };
-  const content = extractDeltaContent(data.choices?.[0]?.message?.content);
-  if (!content) throw new Error('模型没有返回可显示的内容');
-  return content.trim();
 }

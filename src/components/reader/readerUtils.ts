@@ -5,6 +5,13 @@ export function getImageData(value: string) {
   return match?.[1].split('|')[0];
 }
 
+export function formatMessageTime(timestamp: number | undefined, fallback: number) {
+  const value = typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : fallback;
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function themedMarkdownStyles(palette: ReaderPalette) {
   return {
     body: { color: palette.text },

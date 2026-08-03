@@ -45,6 +45,19 @@ export type FoliateBookmarkSelection = {
   text: string;
 };
 
+export type FoliateSearchExcerpt = {
+  pre: string;
+  match: string;
+  post: string;
+};
+
+export type FoliateSearchResult = {
+  cfi: string;
+  sectionIndex: number;
+  sectionTitle: string;
+  excerpt: FoliateSearchExcerpt;
+};
+
 export type FoliateReaderHandle = {
   next: () => void;
   previous: () => void;
@@ -52,6 +65,8 @@ export type FoliateReaderHandle = {
   goToFraction: (fraction: number) => void;
   previewFraction: (fraction: number) => void;
   back: () => void;
+  search: (query: string, requestId: number) => void;
+  clearSearch: () => void;
   beginBookmarkSelection: () => void;
   endBookmarkSelection: () => void;
   setBookmarks: (bookmarks: Bookmark[]) => void;
@@ -72,6 +87,10 @@ type Props = {
   onBookmarkSelection: (selection: FoliateBookmarkSelection) => void;
   onBookmarkSelectionModeChange: (active: boolean) => void;
   onNavigationStateChange: (state: { canGoBack: boolean; noteOpen: boolean }) => void;
+  onSearchResults: (payload: { requestId: number; sectionIndex: number; sectionTitle: string; results: FoliateSearchResult[] }) => void;
+  onSearchProgress: (payload: { requestId: number; progress: number }) => void;
+  onSearchComplete: (requestId: number) => void;
+  onSearchError: (payload: { requestId: number; message: string }) => void;
   onError: (message: string) => void;
 };
 
@@ -87,6 +106,10 @@ type HostMessage =
   | { type: 'image-transfer-chunk'; transferId: string; chunk: string }
   | { type: 'image-transfer-end'; transferId: string }
   | { type: 'navigation-state'; canGoBack: boolean; noteOpen: boolean }
+  | { type: 'search-results'; requestId: number; sectionIndex: number; sectionTitle: string; results: FoliateSearchResult[] }
+  | { type: 'search-progress'; requestId: number; progress: number }
+  | { type: 'search-complete'; requestId: number }
+  | { type: 'search-error'; requestId: number; message: string }
   | { type: 'error'; message: string };
 
 
@@ -135,6 +158,8 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     goToFraction: (fraction) => call('goToFraction', fraction),
     previewFraction: (fraction) => call('previewFraction', fraction),
     back: () => call('back'),
+    search: (query, requestId) => call('search', query, requestId),
+    clearSearch: () => call('clearSearch'),
     beginBookmarkSelection: () => call('beginBookmarkSelection'),
     endBookmarkSelection: () => call('endBookmarkSelection'),
     setBookmarks,
@@ -214,12 +239,36 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
       props.onNavigationStateChange({ canGoBack: message.canGoBack, noteOpen: message.noteOpen });
       return;
     }
+    if (message.type === 'search-results') {
+      if (Number.isInteger(message.requestId) && Number.isInteger(message.sectionIndex) && message.sectionIndex >= 0 && typeof message.sectionTitle === 'string' && Array.isArray(message.results)) {
+        const results = message.results.filter((item) => typeof item?.cfi === 'string'
+          && Number.isInteger(item?.sectionIndex) && item.sectionIndex >= 0
+          && typeof item?.sectionTitle === 'string'
+          && typeof item?.excerpt?.pre === 'string'
+          && typeof item?.excerpt?.match === 'string'
+          && typeof item?.excerpt?.post === 'string');
+        props.onSearchResults({ requestId: message.requestId, sectionIndex: message.sectionIndex, sectionTitle: message.sectionTitle, results });
+      }
+      return;
+    }
+    if (message.type === 'search-progress') {
+      if (Number.isInteger(message.requestId) && Number.isFinite(message.progress)) props.onSearchProgress({ requestId: message.requestId, progress: Math.max(0, Math.min(1, message.progress)) });
+      return;
+    }
+    if (message.type === 'search-complete') {
+      if (Number.isInteger(message.requestId)) props.onSearchComplete(message.requestId);
+      return;
+    }
+    if (message.type === 'search-error') {
+      if (Number.isInteger(message.requestId) && typeof message.message === 'string') props.onSearchError({ requestId: message.requestId, message: message.message });
+      return;
+    }
     if (message.type === 'error') {
       setError(message.message);
       setLoading(false);
       props.onError(message.message);
     }
-  }, [props.onBookmarkSelection, props.onBookmarkSelectionModeChange, props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onNavigationStateChange, props.onReady, sendBook]);
+  }, [props.onBookmarkSelection, props.onBookmarkSelectionModeChange, props.onCenterTap, props.onError, props.onLocationChange, props.onLongPress, props.onNavigationStateChange, props.onReady, props.onSearchComplete, props.onSearchError, props.onSearchProgress, props.onSearchResults, sendBook]);
 
   return (
     <View style={[styles.container, { backgroundColor: props.palette.bg }]}>
@@ -245,8 +294,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
       />
       {loading && !error && (
         <View pointerEvents="none" style={[StyleSheet.absoluteFillObject, styles.loading, { backgroundColor: props.palette.bg }]}>
-          <ActivityIndicator color={props.palette.accent} />
-          <Text style={[styles.loadingText, { color: props.palette.muted }]}>Foliate 正在解析 EPUB…</Text>
+          <ActivityIndicator size="large" color={props.palette.accent} style={{ transform: [{ scale: 1.35 }] }} />
         </View>
       )}
       {error && (
@@ -264,7 +312,6 @@ export const FoliateReader = memo(forwardRef(FoliateReaderComponent));
 const styles = StyleSheet.create({
   container: { flex: 1, overflow: 'hidden' },
   loading: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
-  loadingText: { marginTop: 12, fontSize: 14 },
   errorTitle: { fontSize: 18, fontWeight: '700', marginBottom: 10 },
   errorText: { fontSize: 13, lineHeight: 20, textAlign: 'center' },
 });

@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Animated, FlatList, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
@@ -8,8 +8,9 @@ import { askAI } from '../../ai';
 import { AIConversation, AIMessage, AISettings, Bookmark, Book, ReaderPrefs } from '../../types';
 import { getReaderPalette, ReaderPalette } from '../../ui/theme';
 import { markdownStyles, styles } from '../../ui/styles';
-import { DraggableSheet } from './DraggableSheet';
-import { themedMarkdownStyles } from './readerUtils';
+import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
+import { formatMessageTime, themedMarkdownStyles } from './readerUtils';
+import { useKeyboardVisibility } from './useKeyboardVisibility';
 
 export function TOCModal({ palette, visible, chapters, current, onChoose, onClose }: { palette: ReaderPalette; visible: boolean; chapters: string[]; current: number; onChoose: (index: number) => void; onClose: () => void }) {
   const listRef = useRef<FlatList<string>>(null);
@@ -19,7 +20,7 @@ export function TOCModal({ palette, visible, chapters, current, onChoose, onClos
     return () => clearTimeout(timer);
   }, [visible, current, chapters.length]);
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={palette}>
         <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: palette.accent }]}>CONTENTS</Text><Text style={[styles.sheetTitle, { color: palette.text }]}>目录</Text></View><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: palette.surfaceAlt }]}><Ionicons name="close" size={20} color={palette.text} /></Pressable></View>
         <FlatList
@@ -61,7 +62,7 @@ export function BookmarksModal(props: {
   const ordered = [...props.bookmarks].sort((a, b) => a.chapterIndex - b.chapterIndex || a.paragraphIndex - b.paragraphIndex);
   const orderedConversations = [...props.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
   return (
-    <Modal visible={props.visible} transparent animationType="slide" onRequestClose={props.onClose}>
+    <Modal visible={props.visible} transparent animationType="slide" statusBarTranslucent onRequestClose={props.onClose}>
       <DraggableSheet visible={props.visible} onClose={props.onClose} palette={props.palette} style={styles.bookmarksSheet}>
         <View style={styles.sheetHeader}>
           <View><Text style={[styles.sheetEyebrow, { color: props.palette.accent }]}>MARGINALIA</Text><Text style={[styles.sheetTitle, { color: props.palette.text }]}>页边</Text></View>
@@ -128,14 +129,16 @@ export function ConversationViewerModal(props: {
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
+  const [answerTimestamp, setAnswerTimestamp] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const controller = useRef<AbortController | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const keyboardVisible = useKeyboardVisibility(!!props.conversation);
   useEffect(() => {
     if (!props.conversation) return;
     setMessages(props.conversation.messages);
-    setQuestion(''); setAnswer(''); setError(''); setLoading(false);
+    setQuestion(''); setAnswer(''); setAnswerTimestamp(null); setError(''); setLoading(false);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
     return () => controller.current?.abort();
   }, [props.conversation?.id]);
@@ -147,9 +150,10 @@ export function ConversationViewerModal(props: {
     if (!text || loading) return;
     if (!props.settings.apiKey.trim()) { setError('模型密钥不可用，请先在设置中配置。'); return; }
     const priorMessages = messages;
-    const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text }];
+    const userCreatedAt = Date.now();
+    const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text, createdAt: userCreatedAt }];
     setMessages(pendingMessages);
-    setQuestion(''); setAnswer(''); setLoading(true); setError('');
+    setQuestion(''); setAnswer(''); setAnswerTimestamp(Date.now()); setLoading(true); setError('');
     controller.current?.abort();
     controller.current = new AbortController();
     try {
@@ -167,24 +171,34 @@ export function ConversationViewerModal(props: {
         signal: controller.current.signal,
         onDelta: (delta) => setAnswer((current) => current + delta),
       });
-      const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: answer }];
-      setMessages(next); setAnswer('');
+      const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: answer, createdAt: Date.now() }];
+      setMessages(next); setAnswer(''); setAnswerTimestamp(null);
       props.onUpdate({ ...conversation, messages: next, updatedAt: Date.now() });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
     } catch (cause) {
+      setAnswerTimestamp(null);
       if ((cause as Error).name === 'AbortError') return;
       setError(cause instanceof Error ? cause.message : '继续对话失败');
     } finally { setLoading(false); }
   };
+  const stay = () => {
+    Keyboard.dismiss();
+    props.onStay();
+  };
+  const returnToAnchor = () => {
+    Keyboard.dismiss();
+    props.onReturn();
+  };
   return (
-    <View style={styles.aiOverlayRoot}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalRoot}>
-        <DraggableSheet visible onClose={props.onStay} palette={props.palette} animateIn fillBelow style={[styles.aiSheet, styles.aiSheetExpanded]}>
+    <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={stay}>
+      <View style={styles.aiOverlayRoot}>
+        <SheetBackdrop palette={props.palette} onPress={stay} />
+        <KeyboardAvoidingView pointerEvents="box-none" behavior={Platform.OS === 'ios' ? 'padding' : keyboardVisible ? 'height' : undefined} style={styles.modalRoot}>
+        <DraggableSheet visible onClose={stay} palette={props.palette} fillBelow showScrim={false} style={[styles.aiSheet, styles.aiSheetExpanded]}>
           <View style={[styles.historyHeader, { borderBottomColor: props.palette.line }]}>
-            <View style={[styles.historyTeleportMark, { backgroundColor: props.palette.accent }]}><Ionicons name="return-down-back" size={17} color={props.palette.onAccent} /></View>
-            <View style={{ flex: 1 }}><Text style={[styles.historyMode, { color: props.palette.accent }]}>临时回看 · 拖动上方灰条可留在这里</Text><Text numberOfLines={1} style={[styles.historyChapter, { color: props.palette.text }]}>{conversation.chapterTitle}</Text></View>
-            <Pressable onPress={props.onReturn} style={[styles.returnButton, { borderColor: props.palette.line }]}><Ionicons name="arrow-undo" size={16} color={props.palette.accent} /><Text style={[styles.returnButtonText, { color: props.palette.accent }]}>返回原处</Text></Pressable>
+            <View style={{ flex: 1 }}><Text numberOfLines={1} style={[styles.historyChapter, { color: props.palette.text }]}>{conversation.chapterTitle}</Text></View>
+            <Pressable onPress={returnToAnchor} style={[styles.returnButton, { borderColor: props.palette.line }]}><Ionicons name="arrow-undo" size={16} color={props.palette.accent} /><Text style={[styles.returnButtonText, { color: props.palette.accent }]}>返回原处</Text></Pressable>
           </View>
           <View style={[styles.historyAnchor, { backgroundColor: props.palette.surfaceAlt, borderLeftColor: props.palette.accent }]}>
             <Text style={[styles.historyAnchorLabel, { color: props.palette.accent }]}>当时的原文 · 位置 {conversation.paragraphIndex + 1}</Text>
@@ -193,27 +207,30 @@ export function ConversationViewerModal(props: {
           <ScrollView ref={scrollRef} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             {messages.map((message, index) => message.role === 'user' ? (
               <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, { backgroundColor: props.palette.focus }]}>
-                <Text style={[styles.historyQuestionLabel, { color: props.palette.accent }]}>你问</Text><Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
+                <Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
+                <Text style={[styles.messageTime, styles.questionMessageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
               </View>
             ) : (
               <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                <Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text><Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
+                <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
+                <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
               </View>
             ))}
             {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-              <Text style={[styles.answerLabel, { color: props.palette.accent }]}>墨问批注</Text><Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
+              <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
+              <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(answerTimestamp ?? undefined, conversation.createdAt)}</Text>
             </View>}
-            {loading && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>沿着原对话继续思考…</Text></View>}
+            {loading && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>正在生成回复…</Text></View>}
             {!!error && <Text style={[styles.historyError, { color: props.palette.text, backgroundColor: props.palette.surfaceAlt }]}>{error}</Text>}
-            <Text style={[styles.historyEnd, { color: props.palette.muted }]}>这段对话留在此处 · {new Date(conversation.updatedAt).toLocaleString()}</Text>
           </ScrollView>
           <View style={[styles.historyComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
             <TextInput value={question} onChangeText={setQuestion} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.historyInput, { backgroundColor: props.palette.control, borderColor: props.palette.line, color: props.palette.text }]} />
             <Pressable disabled={!question.trim() || loading} onPress={continueConversation} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
           </View>
         </DraggableSheet>
-      </KeyboardAvoidingView>
-    </View>
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
   );
 }
 
@@ -226,7 +243,7 @@ export function TypeModal({ visible, value, onChange, onClose }: { visible: bool
     { key: 'night', name: '夜墨', color: '#17292D' },
   ];
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={previewPalette} style={styles.typeSheet}>
         <View style={styles.sheetHeader}><Text style={[styles.sheetTitle, { color: previewPalette.text }]}>阅读外观</Text><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: previewPalette.surfaceAlt }]}><Ionicons name="close" size={20} color={previewPalette.text} /></Pressable></View>
         <ScrollView contentContainerStyle={styles.typeScroll} showsVerticalScrollIndicator={false}>
@@ -288,6 +305,7 @@ export const ReaderToolbar = memo(function ReaderToolbar(props: {
   marginCount: number;
   onBack: () => void;
   onContents: () => void;
+  onSearch: () => void;
   onAppearance: () => void;
   onMargins: () => void;
   onProgressStart: (pageX: number) => void;
@@ -296,12 +314,80 @@ export const ReaderToolbar = memo(function ReaderToolbar(props: {
 }) {
   return <Animated.View pointerEvents={props.visible ? 'auto' : 'none'} style={[styles.readerBottom, { backgroundColor: props.palette.bar, borderColor: props.palette.line, opacity: props.animation, transform: [{ translateY: props.animation.interpolate({ inputRange: [0, 1], outputRange: [82, 0] }) }] }]}>
     <Pressable accessibilityLabel="返回" onPress={props.onBack} style={styles.bottomAction}><Ionicons name="arrow-back" size={22} color={props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>返回</Text></Pressable>
-    <Pressable onPress={props.onContents} style={styles.bottomAction}><Ionicons name="list" size={22} color={props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>目录</Text></Pressable>
-    <View accessibilityLabel="长按调整全书进度" onStartShouldSetResponder={() => true} onMoveShouldSetResponder={() => true} onResponderGrant={(event) => props.onProgressStart(event.nativeEvent.pageX)} onResponderMove={(event) => props.onProgressMove(event.nativeEvent.pageX)} onResponderRelease={props.onProgressEnd} onResponderTerminate={props.onProgressEnd} onResponderTerminationRequest={() => false} style={styles.progressPill}><Text style={[styles.progressMain, { color: props.palette.text }]}>{Math.round(props.progress * 100)}%</Text><Text style={[styles.progressText, { color: props.palette.muted }]}>按住拖动 · {props.chapter + 1}/{props.chapterCount} 章</Text></View>
+    <Pressable accessibilityLabel="搜索正文" onPress={props.onSearch} style={styles.bottomAction}><Ionicons name="search" size={21} color={props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>搜索</Text></Pressable>
+    <ProgressPill palette={props.palette} progress={props.progress} chapter={props.chapter} chapterCount={props.chapterCount} onContents={props.onContents} onProgressStart={props.onProgressStart} onProgressMove={props.onProgressMove} onProgressEnd={props.onProgressEnd} />
     <Pressable onPress={props.onAppearance} style={styles.bottomAction}><Text style={[styles.bottomAa, { color: props.palette.muted }]}>Aa</Text><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>外观</Text></Pressable>
     <Pressable onPress={props.onMargins} style={styles.bottomAction}><Ionicons name="albums-outline" size={21} color={props.marginCount ? props.palette.accent : props.palette.muted} /><Text style={[styles.bottomLabel, { color: props.palette.muted }]}>页边 {props.marginCount || ''}</Text></Pressable>
   </Animated.View>;
 });
+
+function ProgressPill(props: { palette: ReaderPalette; progress: number; chapter: number; chapterCount: number; onContents: () => void; onProgressStart: (pageX: number) => void; onProgressMove: (pageX: number) => void; onProgressEnd: () => void }) {
+  const start = useRef({ x: 0, y: 0 });
+  const dragging = useRef(false);
+  const moved = useRef(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [longPressed, setLongPressed] = useState(false);
+  useEffect(() => () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  }, []);
+  const clearLongPress = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  };
+  const begin = (event: { nativeEvent: { pageX: number; pageY: number } }) => {
+    start.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY };
+    dragging.current = false;
+    moved.current = false;
+    clearLongPress();
+    longPressTimer.current = setTimeout(() => {
+      dragging.current = true;
+      setLongPressed(true);
+      props.onProgressStart(start.current.x);
+    }, 150);
+  };
+  const move = (event: { nativeEvent: { pageX: number; pageY: number } }) => {
+    if (dragging.current) {
+      props.onProgressMove(event.nativeEvent.pageX);
+      return;
+    }
+    if (Math.abs(event.nativeEvent.pageX - start.current.x) > 8 || Math.abs(event.nativeEvent.pageY - start.current.y) > 8) {
+      moved.current = true;
+      clearLongPress();
+    }
+  };
+  const end = () => {
+    clearLongPress();
+    if (dragging.current) props.onProgressEnd();
+    else if (!moved.current) props.onContents();
+    dragging.current = false;
+    moved.current = false;
+    setLongPressed(false);
+  };
+  const cancel = () => {
+    clearLongPress();
+    if (dragging.current) props.onProgressEnd();
+    dragging.current = false;
+    setLongPressed(false);
+  };
+  return (
+    <View
+      accessibilityRole="button"
+      accessibilityLabel="目录与全书进度"
+      accessibilityHint="单击打开目录，长按后拖动调整全书进度"
+      onStartShouldSetResponder={() => true}
+      onMoveShouldSetResponder={() => true}
+      onResponderGrant={begin}
+      onResponderMove={move}
+      onResponderRelease={end}
+      onResponderTerminate={cancel}
+      onResponderTerminationRequest={() => false}
+      style={styles.progressPill}
+    >
+      <Text style={[styles.progressMain, { color: props.palette.text }]}>{Math.round(props.progress * 100)}%</Text>
+      <Text style={[styles.progressText, { color: longPressed ? props.palette.accent : props.palette.muted }]}>{longPressed ? '松手跳转' : `单击/长按 · ${props.chapter + 1}/${props.chapterCount} 章`}</Text>
+    </View>
+  );
+}
 
 function AppearanceOption({ palette, label, active, onPress }: { palette: ReaderPalette; label: string; active: boolean; onPress: () => void }) {
   return <Pressable onPress={onPress} style={({ pressed }) => [styles.appearanceOption, { borderColor: active ? palette.accent : palette.line, backgroundColor: active ? palette.focus : palette.control }, pressed && styles.pressed]}><Text style={[styles.appearanceOptionText, { color: active ? palette.accent : palette.muted }, active && styles.appearanceOptionTextActive]}>{label}</Text></Pressable>;

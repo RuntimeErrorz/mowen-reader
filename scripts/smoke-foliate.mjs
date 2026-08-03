@@ -92,7 +92,7 @@ try {
     const pageState = await evaluate(`JSON.stringify({url:location.href,ready:document.readyState,body:document.body?.innerHTML?.slice(0,300)})`);
     throw new Error(`Smoke page did not load the reader shell: ${pageState}`);
   }
-  await evaluate(`globalThis.ReactNativeWebView={postMessage(raw){const message=JSON.parse(raw);document.documentElement.dataset.lastMessage=message.type;if(message.type==='book-ready')document.documentElement.dataset.foliate='ready';if(message.type==='relocate')document.documentElement.dataset.relocate=String(message.position)+'/'+String(message.totalPositions);if(message.type==='error')document.documentElement.dataset.error=message.message;}};true;`);
+  await evaluate(`globalThis.ReactNativeWebView={postMessage(raw){const message=JSON.parse(raw);document.documentElement.dataset.lastMessage=message.type;if(message.type==='book-ready')document.documentElement.dataset.foliate='ready';if(message.type==='relocate')document.documentElement.dataset.relocate=String(message.position)+'/'+String(message.totalPositions);if(message.type==='search-results'){document.documentElement.dataset.searchResultCount=String(Number(document.documentElement.dataset.searchResultCount||0)+message.results.length);if(!document.documentElement.dataset.firstSearchCfi)document.documentElement.dataset.firstSearchCfi=message.results[0]?.cfi||'';}if(message.type==='search-complete')document.documentElement.dataset.searchComplete=String(message.requestId);if(message.type==='search-error')document.documentElement.dataset.searchError=message.message;if(message.type==='error')document.documentElement.dataset.error=message.message;}};true;`);
   await evaluate(bundle, 15_000);
   await evaluate(bridge, 15_000);
   for (const chunk of chunks) await evaluate(`globalThis.__MOWEN__.appendChunk(${JSON.stringify(chunk)});true;`);
@@ -117,6 +117,21 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   if (!pagerState.nextReady) throw new Error('Foliate next-page preview did not become ready');
+  const searchSeed = await evaluate(`(()=>{const doc=document.querySelector('foliate-view')?.renderer?.getContents?.()[0]?.doc;return (doc?.body?.innerText||'').replace(/\s+/g,' ').trim().slice(0,4)})()`);
+  if (!searchSeed) throw new Error('Foliate search smoke could not find a text seed');
+  await evaluate(`globalThis.__MOWEN__.search(${JSON.stringify(searchSeed)},7001);true`);
+  let searchState = {};
+  const searchDeadline = Date.now() + 45_000;
+  while (Date.now() < searchDeadline) {
+    const value = await evaluate('JSON.stringify({...document.documentElement.dataset})');
+    searchState = value ? JSON.parse(value) : {};
+    if (searchState.searchError || searchState.searchComplete === '7001') break;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  if (searchState.searchError || searchState.searchComplete !== '7001' || Number(searchState.searchResultCount || 0) < 1 || !searchState.firstSearchCfi)
+    throw new Error(searchState.searchError || `Foliate search did not return a CFI result: ${JSON.stringify(searchState)}`);
+  await evaluate(`globalThis.__MOWEN__.goTo(${JSON.stringify(searchState.firstSearchCfi)});true`, 15_000);
+  await evaluate('globalThis.__MOWEN__.clearSearch();true');
   const previousLocation = state.relocate;
   const previousCfi = pagerState.currentCfi;
   await evaluate(`globalThis.__MOWEN__.next();true`);

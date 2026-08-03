@@ -28,6 +28,7 @@ type LibraryScreenProps = {
   onOpen: (book: BookSummary) => void;
   onRemove: (book: BookSummary) => void;
   onSettings: () => void;
+  onData: () => void;
 };
 
 export function LibraryScreen(props: LibraryScreenProps) {
@@ -39,9 +40,14 @@ export function LibraryScreen(props: LibraryScreenProps) {
           <Text style={[styles.eyebrow, { color: props.palette.accent }]}>MÒ WÈN · READER</Text>
           <Text style={[styles.libraryTitle, { color: props.palette.text }]}>墨问</Text>
         </View>
-        <Pressable accessibilityLabel="AI 设置" onPress={props.onSettings} style={({ pressed }) => [styles.iconButtonDark, { borderColor: props.palette.line, backgroundColor: props.palette.surfaceAlt }, pressed && styles.pressed]}>
-          <Ionicons name="options-outline" size={22} color={props.palette.text} />
-        </Pressable>
+        <View style={styles.libraryHeaderActions}>
+          <Pressable accessibilityLabel="数据管理" onPress={props.onData} style={({ pressed }) => [styles.iconButtonDark, { borderColor: props.palette.line, backgroundColor: props.palette.surfaceAlt }, pressed && styles.pressed]}>
+            <Ionicons name="archive-outline" size={21} color={props.palette.text} />
+          </Pressable>
+          <Pressable accessibilityLabel="AI 设置" onPress={props.onSettings} style={({ pressed }) => [styles.iconButtonDark, { borderColor: props.palette.line, backgroundColor: props.palette.surfaceAlt }, pressed && styles.pressed]}>
+            <Ionicons name="options-outline" size={22} color={props.palette.text} />
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={styles.libraryScroll} showsVerticalScrollIndicator={false}>

@@ -28,6 +28,8 @@ export const FOLIATE_BRIDGE_PART_0 = String.raw`
     bookmarkOuterPageGesture: null,
     bookmarkPageDragOffset: 0,
     bookmarkHighlightKeys: new Set(),
+    searchToken: 0,
+    searchIterator: null,
   };
   const labelOf = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.zh || value['zh-CN'] || value.en || Object.values(value)[0] || '') : '';
   const flattenTOC = (items, depth = 0, output = []) => {

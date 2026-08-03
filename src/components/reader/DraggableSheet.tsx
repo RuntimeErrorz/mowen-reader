@@ -9,6 +9,8 @@ type DraggableSheetProps = {
   palette?: ReaderPalette;
   animateIn?: boolean;
   fillBelow?: boolean;
+  showScrim?: boolean;
+  onOpenComplete?: () => void;
   style?: React.ComponentProps<typeof Animated.View>['style'];
   children: React.ReactNode;
 };
@@ -18,13 +20,18 @@ export function DraggableSheet(props: DraggableSheetProps) {
   const { height: windowHeight } = useWindowDimensions();
   const translateY = useRef(new Animated.Value(props.animateIn ? windowHeight : 0)).current;
   useEffect(() => {
-    if (!props.visible) return;
+    if (!props.visible) {
+      if (props.animateIn) translateY.setValue(windowHeight);
+      return;
+    }
     if (!props.animateIn) { translateY.setValue(0); return; }
     const frame = requestAnimationFrame(() => {
-      Animated.timing(translateY, { toValue: 0, duration: 190, useNativeDriver: true }).start();
+      Animated.timing(translateY, { toValue: 0, duration: 190, useNativeDriver: true }).start(({ finished }) => {
+        if (finished) props.onOpenComplete?.();
+      });
     });
     return () => cancelAnimationFrame(frame);
-  }, [props.animateIn, props.visible, translateY]);
+  }, [props.animateIn, props.onOpenComplete, props.visible, translateY]);
   const panResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 2 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
@@ -46,13 +53,17 @@ export function DraggableSheet(props: DraggableSheetProps) {
     extrapolate: 'clamp',
   });
   return <>
-    <Animated.View style={[styles.scrim, { backgroundColor: palette.scrim, opacity: scrimOpacity }]}><Pressable style={StyleSheet.absoluteFill} onPress={props.onClose} /></Animated.View>
+    {props.showScrim !== false && <Animated.View style={[styles.scrim, { backgroundColor: palette.scrim, opacity: scrimOpacity }]}><Pressable style={StyleSheet.absoluteFill} onPress={props.onClose} /></Animated.View>}
     <Animated.View style={[styles.sheet, { backgroundColor: palette.surface }, props.style, { transform: [{ translateY }] }]}>
       {props.fillBelow && <View pointerEvents="none" style={[styles.sheetFillBelow, { height: windowHeight, backgroundColor: palette.surface }]} />}
       <View style={styles.dragHandleZone} {...panResponder.panHandlers}><SheetHandle color={palette.line} /></View>
       {props.children}
     </Animated.View>
   </>;
+}
+
+export function SheetBackdrop({ palette, onPress }: { palette: ReaderPalette; onPress: () => void }) {
+  return <View style={[styles.scrim, { backgroundColor: palette.scrim }]}><Pressable style={StyleSheet.absoluteFill} onPress={onPress} /></View>;
 }
 
 export function SheetHandle({ color = '#C2CAC5' }: { color?: string }) {

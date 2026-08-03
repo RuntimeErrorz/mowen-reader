@@ -64,11 +64,14 @@ export type AISettings = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  customRequestParams: string;
 };
 
 export type AIMessage = {
   role: 'user' | 'assistant';
   content: string;
+  /** Optional for backwards compatibility with conversations saved before timestamps were added. */
+  createdAt?: number;
 };
 
 export type Bookmark = {

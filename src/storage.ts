@@ -94,6 +94,7 @@ export const defaultAI: AISettings = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   apiKey: process.env.EXPO_PUBLIC_DASHSCOPE_API_KEY ?? '',
   model: 'qwen3.7-flash',
+  customRequestParams: '',
 };
 
 async function ensureBookDir() {
@@ -297,11 +298,18 @@ export async function loadAISettings(): Promise<AISettings> {
   ]);
   const resolvedKey = apiKey ?? defaultAI.apiKey;
   if (!apiKey && resolvedKey) await SecureStore.setItemAsync(AI_SECRET_KEY, resolvedKey);
-  return { ...defaultAI, ...(value ? JSON.parse(value) : {}), apiKey: resolvedKey };
+  const saved = value ? JSON.parse(value) as Partial<AISettings> : {};
+  return {
+    ...defaultAI,
+    ...saved,
+    customRequestParams: typeof saved.customRequestParams === 'string' ? saved.customRequestParams : defaultAI.customRequestParams,
+    apiKey: resolvedKey,
+  };
 }
 
 export async function saveAISettings(value: AISettings) {
-  const { apiKey, ...publicSettings } = value;
+  const { apiKey } = value;
+  const publicSettings = { baseUrl: value.baseUrl, model: value.model, customRequestParams: value.customRequestParams };
   await Promise.all([
     AsyncStorage.setItem(AI_KEY, JSON.stringify(publicSettings)),
     apiKey ? SecureStore.setItemAsync(AI_SECRET_KEY, apiKey) : SecureStore.deleteItemAsync(AI_SECRET_KEY),
