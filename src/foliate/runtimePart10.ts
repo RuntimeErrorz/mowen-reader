@@ -114,7 +114,8 @@ export const FOLIATE_BRIDGE_PART_10 = String.raw`efaultView?.clearTimeout(bookma
     const semantic = /(?:doc-)?(?:note|gloss|biblio)ref/i.test(type + ' ' + role);
     const named = /(?:^|[\s_-])(footnote|endnote|note|noteref|fn|ref|jzyy)(?:[\s_-]|$)/i.test(classes);
     const numbered = /^[（(\[]?[0-9一二三四五六七八九十百]+[）)\].、]?$/u.test(marker);
-    return semantic || named || (numbered && (!!anchor.querySelector('sup') || anchor.parentElement?.tagName?.toLowerCase() === 'sup'));
+    const numericMarker = numbered || markerLooksNumbered(marker);
+    return semantic || named || (numericMarker && (!!anchor.querySelector('sup') || anchor.parentElement?.tagName?.toLowerCase() === 'sup' || !!localNoteBlock(anchor)));
   };
   const noteBlock = (node, source) => {
     if (node?.nodeType === 3) node = node.parentElement;
@@ -122,6 +123,26 @@ export const FOLIATE_BRIDGE_PART_10 = String.raw`efaultView?.clearTimeout(bookma
     const inline = 'a,span,sup,sub,em,strong,i,b,small,big';
     while (node?.matches?.(inline) && node.parentElement && node.parentElement !== source.body) node = node.parentElement;
     return node?.closest?.('li,p,aside,blockquote,dd,dt,section,div') || node;
+  };
+  const fragmentIdOf = href => {
+    const value = String(href || '');
+    const hash = value.indexOf('#');
+    if (hash < 0) return '';
+    try { return decodeURIComponent(value.slice(hash + 1)); } catch { return value.slice(hash + 1); }
+  };
+  const markerLooksNumbered = marker => /^[\[\(]?\s*(?:\d+|[\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E\u5343\u4E07]+)\s*[\]\)]?\s*$/u.test(String(marker || '').trim());
+  const localNoteBlock = anchor => {
+    const source = anchor?.ownerDocument;
+    const id = fragmentIdOf(anchor?.getAttribute?.('href'));
+    const markerOwner = anchor?.closest?.('[id]');
+    if (!source || !id || !markerOwner) return null;
+    const target = source.getElementById(id);
+    if (!target) return null;
+    const block = noteBlock(target, source);
+    const origin = noteBlock(markerOwner, source);
+    if (!block || !origin || block === origin) return null;
+    const text = String(block.textContent || '').replace(/\s+/g, ' ').trim();
+    return text.length >= 20 ? block : null;
   };
   const noteIsOpen = () => document.getElementById('note-backdrop')?.classList.contains('open') ?? false;
   const imageViewerIsOpen = () => document.getElementById('image-viewer')?.classList.contains('open') ?? false;
@@ -171,6 +192,11 @@ export const FOLIATE_BRIDGE_PART_10 = String.raw`efaultView?.clearTimeout(bookma
       const rawHref = a?.getAttribute?.('href') || '';
       const markerText = (a?.textContent || '').replace(/\s+/g, ' ').trim()
         || (String(rawHref).split('#').pop()?.match(/[0-9一二三四五六七八九十百]+/u)?.[0] || '');
+      const localTarget = localNoteBlock(a);
+      if (localTarget) {
+        showNote(localTarget.cloneNode(true), markerText);
+        return;
+      }
       Promise.resolve(view.book.resolveHref(href || rawHref)).then(async target => {
         if (!target || target.index == null) throw new Error('无法定位注释内容');
         const source = await view.book.sections[target.index]?.createDocument?.();

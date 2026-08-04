@@ -2,18 +2,70 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, FlatList, Modal, Platform, Pressable, ScrollView, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
+import { FoliateTOCItem } from '../../FoliateReader';
 import { AIConversation, Bookmark, ReaderPrefs } from '../../types';
 import { getReaderPalette, ReaderPalette } from '../../ui/theme';
 import { styles } from '../../ui/styles';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
 
-export function TOCModal({ palette, visible, chapters, current, onChoose, onClose }: { palette: ReaderPalette; visible: boolean; chapters: string[]; current: number; onChoose: (index: number) => void; onClose: () => void }) {
-  const listRef = useRef<FlatList<string>>(null);
+type TocRow = FoliateTOCItem & {
+  index: number;
+  parentIndex: number | null;
+  hasChildren: boolean;
+};
+
+function buildTocRows(items: FoliateTOCItem[]): TocRow[] {
+  const parentAtDepth: Array<number | undefined> = [];
+  return items.map((item, index) => {
+    const depth = Math.max(0, item.depth);
+    parentAtDepth.length = depth;
+    const parentIndex = depth > 0 ? parentAtDepth[depth - 1] ?? null : null;
+    parentAtDepth[depth] = index;
+    parentAtDepth.length = depth + 1;
+    return {
+      ...item,
+      depth,
+      index,
+      parentIndex,
+      hasChildren: (items[index + 1]?.depth ?? -1) > depth,
+    };
+  });
+}
+
+export function TOCModal({ palette, visible, chapters, current, onChoose, onClose }: { palette: ReaderPalette; visible: boolean; chapters: FoliateTOCItem[]; current: number; onChoose: (index: number) => void; onClose: () => void }) {
+  const listRef = useRef<FlatList<TocRow>>(null);
+  const rows = React.useMemo(() => buildTocRows(chapters), [chapters]);
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const visibleRows = React.useMemo(() => rows.filter((row) => {
+    let parentIndex = row.parentIndex;
+    while (parentIndex !== null) {
+      if (!expanded.has(parentIndex)) return false;
+      parentIndex = rows[parentIndex]?.parentIndex ?? null;
+    }
+    return true;
+  }), [expanded, rows]);
+  const currentIndex = Math.min(Math.max(0, current), Math.max(0, rows.length - 1));
+  const currentVisibleIndex = visibleRows.findIndex((row) => row.index === currentIndex);
+
   useEffect(() => {
-    if (!visible || !chapters.length) return;
-    const timer = setTimeout(() => listRef.current?.scrollToIndex({ index: Math.min(current, chapters.length - 1), viewPosition: 0.35, animated: false }), 80);
+    setExpanded(new Set());
+  }, [rows, visible]);
+
+  useEffect(() => {
+    if (!visible || currentVisibleIndex < 0) return;
+    const timer = setTimeout(() => listRef.current?.scrollToIndex({ index: currentVisibleIndex, viewPosition: 0.35, animated: false }), 80);
     return () => clearTimeout(timer);
-  }, [visible, current, chapters.length]);
+  }, [currentVisibleIndex, visible]);
+
+  const toggleRow = (index: number) => {
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={palette}>
@@ -21,18 +73,31 @@ export function TOCModal({ palette, visible, chapters, current, onChoose, onClos
         <FlatList
           ref={listRef}
           style={styles.tocList}
-          data={chapters}
-          keyExtractor={(title, index) => `${title}-${index}`}
+          data={visibleRows}
+          keyExtractor={(item) => `${item.index}-${item.href}-${item.label}`}
           getItemLayout={(_data, index) => ({ length: 60, offset: 60 * index, index })}
-          initialScrollIndex={Math.min(current, Math.max(0, chapters.length - 1))}
+          initialScrollIndex={Math.max(0, currentVisibleIndex)}
           onScrollToIndexFailed={(info) => listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false })}
-          renderItem={({ item: title, index }) => (
-            <Pressable onPress={() => onChoose(index)} style={[styles.tocItem, { borderBottomColor: palette.line }, index === current && { backgroundColor: palette.focus, marginHorizontal: -8, paddingHorizontal: 16, borderBottomWidth: 0 }]}>
-              <Text style={[styles.tocNumber, { color: index === current ? palette.accent : palette.muted }]}>{String(index + 1).padStart(2, '0')}</Text>
-              <Text numberOfLines={2} style={[styles.tocTitle, { color: index === current ? palette.accent : palette.text }]}>{title}</Text>
-              {index === current && <View style={[styles.currentDot, { backgroundColor: palette.accent }]} />}
-            </Pressable>
-          )}
+          renderItem={({ item }) => {
+            const isCurrent = item.index === currentIndex;
+            const itemPaddingLeft = item.depth * 12;
+            return (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => onChoose(item.index)}
+                style={[styles.tocItem, { borderBottomColor: palette.line, paddingLeft: itemPaddingLeft }, isCurrent && { backgroundColor: palette.focus, borderBottomWidth: 0 }]}
+              >
+                {item.hasChildren ? <Pressable
+                  accessibilityLabel={expanded.has(item.index) ? `收起${item.label}` : `展开${item.label}`}
+                  accessibilityRole="button"
+                  onPress={(event) => { event.stopPropagation(); toggleRow(item.index); }}
+                  style={styles.tocDisclosure}
+                ><Ionicons name={expanded.has(item.index) ? 'chevron-down' : 'chevron-forward'} size={17} color={isCurrent ? palette.accent : palette.muted} /></Pressable> : <View style={styles.tocDisclosureSpacer} />}
+                <Text numberOfLines={2} style={[styles.tocTitle, { color: isCurrent ? palette.accent : palette.text }]}>{item.label}</Text>
+                {isCurrent && <View style={[styles.currentDot, { backgroundColor: palette.accent }]} />}
+              </Pressable>
+            );
+          }}
           ListFooterComponent={<View style={{ height: 30 }} />}
         />
       </DraggableSheet>

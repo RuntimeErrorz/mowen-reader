@@ -117,7 +117,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   if (!pagerState.nextReady) throw new Error('Foliate next-page preview did not become ready');
-  const searchSeed = await evaluate(`(()=>{const doc=document.querySelector('foliate-view')?.renderer?.getContents?.()[0]?.doc;return (doc?.body?.innerText||'').replace(/\s+/g,' ').trim().slice(0,4)})()`);
+  const searchSeed = await evaluate(`(async()=>{const view=document.querySelector('foliate-view');const sections=view?.book?.sections||[];const start=Math.min(5,Math.max(0,sections.length-1));const candidates=[...sections.slice(start),...sections.slice(0,start)];for(const section of candidates){if(section.linear==='no')continue;const doc=await section.createDocument?.();const paragraphs=[...(doc?.querySelectorAll?.('p')||[])].map(node=>(node.innerText||'').replace(/\s+/g,' ').trim()).filter(text=>text.length>=160);if(paragraphs.length>=2)return paragraphs[Math.floor(paragraphs.length/2)].slice(0,4)}return ''})()`);
   if (!searchSeed) throw new Error('Foliate search smoke could not find a text seed');
   await evaluate(`globalThis.__MOWEN__.search(${JSON.stringify(searchSeed)},7001);true`);
   let searchState = {};
@@ -145,7 +145,12 @@ try {
   if (state.error || state.pager?.currentCfi === previousCfi || state.pager?.turning) {
     throw new Error(state.error || `Foliate composited page turn did not settle: ${JSON.stringify({ previousLocation, previousCfi, state })}`);
   }
-  const initialCustomSetup = JSON.parse(await evaluate(`(()=>{globalThis.__MOWEN__.beginBookmarkSelection();const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const rect=Array.from(view.lastLocation.range.getClientRects()).find(rect=>rect.width>2&&rect.height>2);if(!rect)return JSON.stringify({started:false});const win=doc.defaultView;const point=new win.Touch({identifier:77,target:doc.body,clientX:rect.left+Math.min(12,rect.width/2),clientY:rect.top+rect.height/2,pageX:rect.left+Math.min(12,rect.width/2),pageY:rect.top+rect.height/2,screenX:Math.min(120,view.renderer.size*.3),screenY:rect.top+rect.height/2});globalThis.__mowenInitialTouch=point;doc.dispatchEvent(new win.TouchEvent('touchstart',{touches:[point],targetTouches:[point],changedTouches:[point],bubbles:true,cancelable:true}));return JSON.stringify({started:true})})()`));
+  let initialCustomSetup = { started: false };
+  const initialSelectionDeadline = Date.now() + 15_000;
+  while (Date.now() < initialSelectionDeadline && !initialCustomSetup.started) {
+    initialCustomSetup = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const range=view?.lastLocation?.range?.cloneRange?.();if(!range)return JSON.stringify({started:false});const rect=Array.from(range.getClientRects()).find(rect=>rect.width>2&&rect.height>2);if(!rect)return JSON.stringify({started:false});const doc=range.startContainer.ownerDocument;globalThis.__MOWEN__.beginBookmarkSelection();const win=doc.defaultView;const point=new win.Touch({identifier:77,target:doc.body,clientX:rect.left+Math.min(12,rect.width/2),clientY:rect.top+rect.height/2,pageX:rect.left+Math.min(12,rect.width/2),pageY:rect.top+rect.height/2,screenX:Math.min(120,view.renderer.size*.3),screenY:rect.top+rect.height/2});globalThis.__mowenInitialTouch=point;doc.dispatchEvent(new win.TouchEvent('touchstart',{touches:[point],targetTouches:[point],changedTouches:[point],bubbles:true,cancelable:true}));return JSON.stringify({started:true})})()`));
+    if (!initialCustomSetup.started) await new Promise(resolve => setTimeout(resolve, 100));
+  }
   if (!initialCustomSetup.started) throw new Error('Foliate custom bookmark selection had no visible text target');
   await new Promise(resolve => setTimeout(resolve, 560));
   const initialCustomState = JSON.parse(await evaluate(`(()=>{const view=document.querySelector('foliate-view');const doc=view.renderer.getContents()[0].doc;const win=doc.defaultView;const point=globalThis.__mowenInitialTouch;doc.dispatchEvent(new win.TouchEvent('touchend',{touches:[],targetTouches:[],changedTouches:[point],bubbles:true,cancelable:true}));delete globalThis.__mowenInitialTouch;const selection=doc.getSelection();return JSON.stringify({text:selection?.toString?.()||'',collapsed:selection?.rangeCount?selection.getRangeAt(0).collapsed:true,visibleHandles:document.querySelectorAll('.bookmark-selection-handle.visible').length})})()`));

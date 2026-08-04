@@ -22,6 +22,7 @@ export const FOLIATE_BRIDGE_PART_3 = String.raw`    } catch {}
     }
   };
   const attachDocumentGestures = ({ doc, index }) => {
+    markLegacyHeadings(doc);
     applyBookmarkHighlights(doc, index, bookmarkOverlayer(doc));
     let touch = null;
     let longPressTimer = 0;
