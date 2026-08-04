@@ -1,0 +1,4 @@
+interface:
+  display_name: "Normalize EPUB for Reader"
+  short_description: "Normalize EPUB notes and structure for the reader"
+  default_prompt: "Use $normalize-epub-for-reader to convert this EPUB into a reader-compatible copy and validate it."
