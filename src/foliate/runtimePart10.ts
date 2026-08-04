@@ -29,10 +29,21 @@ export const FOLIATE_BRIDGE_PART_10 = String.raw`efaultView?.clearTimeout(bookma
     }, { passive: true, capture: true });
     doc.addEventListener('click', event => {
       if (state.bookmarkSelecting) return;
-      if (Date.now() < suppressClickUntil || event.defaultPrevented || interactive(event.target)) return;
+      if (Date.now() < suppressClickUntil || event.defaultPrevented) return;
+      const image = imageFromEvent(event);
+      const noteImage = image && isNoteLink(image.closest?.('a[href]'));
+      if (noteImage) return;
+      if (image && !noteImage) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        suppressClickUntil = Date.now() + 700;
+        openImageViewer(image);
+        return;
+      }
+      if (interactive(event.target)) return;
       const x = event.screenX || (((event.clientX % (state.view?.renderer?.size || screenWidth())) + screenWidth()) % screenWidth());
       handleTap(x);
-    }, false);
+    }, true);
     doc.addEventListener('selectstart', event => {
       if (state.bookmarkSelecting) event.preventDefault();
     }, { capture: true });
@@ -113,10 +124,12 @@ export const FOLIATE_BRIDGE_PART_10 = String.raw`efaultView?.clearTimeout(bookma
     return node?.closest?.('li,p,aside,blockquote,dd,dt,section,div') || node;
   };
   const noteIsOpen = () => document.getElementById('note-backdrop')?.classList.contains('open') ?? false;
+  const imageViewerIsOpen = () => document.getElementById('image-viewer')?.classList.contains('open') ?? false;
   const emitNavigationState = () => send({
     type: 'navigation-state',
-    canGoBack: noteIsOpen() || !!state.view?.history?.canGoBack,
+    canGoBack: noteIsOpen() || imageViewerIsOpen() || !!state.view?.history?.canGoBack,
     noteOpen: noteIsOpen(),
+    imageOpen: imageViewerIsOpen(),
   });
   const showNote = (fragment, marker) => {
     const article = document.createElement('article');

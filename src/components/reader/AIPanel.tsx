@@ -4,11 +4,13 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
 import Slider from '@react-native-community/slider';
-import { askAI, AIIntent } from '../../ai';
+import { askAI, AIIntent, buildAIRequestText } from '../../ai';
+import { labelNoteReferences, noteReferenceItemsIn, type NoteReference } from '../../aiContext';
 import { AIConversation, AIMessage, AISettings, Book, EpubLocator } from '../../types';
 import { C, ReaderPalette } from '../../ui/theme';
 import { markdownStyles, styles } from '../../ui/styles';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
+import { AIContextCard } from './AIContextCard';
 import { formatMessageTime, getImageData, themedMarkdownStyles } from './readerUtils';
 import { useKeyboardVisibility } from './useKeyboardVisibility';
 
@@ -38,6 +40,7 @@ export function AIPanel(props: AIPanelProps) {
   const [error, setError] = useState('');
   const [contextRadius, setContextRadius] = useState(5);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [requestText, setRequestText] = useState('');
   const [conversationMessages, setConversationMessages] = useState<AIMessage[]>([]);
   const [answerTimestamp, setAnswerTimestamp] = useState<number | null>(null);
   const questionInputRef = useRef<TextInput>(null);
@@ -48,7 +51,7 @@ export function AIPanel(props: AIPanelProps) {
   const keyboardVisible = useKeyboardVisibility(props.visible);
   useEffect(() => {
     if (props.visible) {
-      setAnswer(''); setQuestion(''); setError(''); setLoading(false); setConversationMessages([]); setAnswerTimestamp(null);
+      setAnswer(''); setQuestion(''); setError(''); setLoading(false); setRequestText(''); setConversationMessages([]); setAnswerTimestamp(null);
       messagesRef.current = [];
       sessionCreatedAt.current = Date.now();
       sessionId.current = `conversation-${sessionCreatedAt.current}-${Math.random().toString(36).slice(2, 6)}`;
@@ -58,6 +61,20 @@ export function AIPanel(props: AIPanelProps) {
   const run = async (intent: AIIntent) => {
     if (!props.settings.apiKey.trim()) { setError('先配置模型接口，墨问才知道该去哪里思考。'); return; }
     const text = question.trim();
+    const currentRequestText = buildAIRequestText({
+      bookTitle: props.bookTitle,
+      bookAuthor: props.bookAuthor,
+      bookDescription: props.bookDescription,
+      chapter: props.chapter,
+      paragraphIndex: props.paragraphIndex,
+      selectedText: props.selectedText,
+      selectedImage: props.selectedImage,
+      intent,
+      question: text || undefined,
+      contextRadius,
+      imageCount: contextImageUris.length,
+    });
+    setRequestText(currentRequestText);
     const userCreatedAt = Date.now();
     setQuestion('');
     setLoading(true); setError(''); setAnswer(''); setAnswerTimestamp(Date.now());
@@ -72,6 +89,7 @@ export function AIPanel(props: AIPanelProps) {
         intent,
         question: text,
         contextRadius,
+        selectedImage: props.selectedImage,
         additionalImages: props.selectedImage ? [props.selectedImage] : undefined,
         history: priorMessages,
         signal: controller.current.signal,
@@ -87,6 +105,7 @@ export function AIPanel(props: AIPanelProps) {
       messagesRef.current = nextMessages;
       setConversationMessages(nextMessages);
       setAnswer(''); setAnswerTimestamp(null);
+      const selectedText = props.selectedText?.trim() || undefined;
       const rawExcerpt = props.selectedImage ? '〔插图〕' : props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
       props.onSaveConversation({
         id: sessionId.current,
@@ -94,7 +113,9 @@ export function AIPanel(props: AIPanelProps) {
         chapterIndex: props.chapterIndex,
         paragraphIndex: props.paragraphIndex,
         chapterTitle: props.chapter.title,
-        anchorExcerpt: getImageData(rawExcerpt) ? '〔插图〕' : rawExcerpt.replace(/\[\[MOWEN_NOTE_REF:[^\]]+\]\]/g, '〔注〕').slice(0, 180),
+        anchorExcerpt: getImageData(rawExcerpt) ? '〔插图〕' : labelNoteReferences(rawExcerpt).slice(0, 180),
+        selectedText,
+        selectedImage: props.selectedImage || undefined,
         locator: props.locator,
         contextRadius,
         messages: nextMessages,
@@ -114,7 +135,7 @@ export function AIPanel(props: AIPanelProps) {
     requestAnimationFrame(() => questionInputRef.current?.focus());
   };
   const openImagePreview = (uri: string) => setPreviewImage(uri);
-  const excerpt = props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
+  const excerpt = labelNoteReferences(props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '');
   const excerptIsImage = !!props.selectedImage || !!getImageData(excerpt);
   const start = Math.max(0, props.paragraphIndex - contextRadius);
   const end = Math.min(props.chapter.paragraphs.length, props.paragraphIndex + contextRadius + 1);
@@ -128,7 +149,16 @@ export function AIPanel(props: AIPanelProps) {
     }
     return values.filter((value, index, all) => all.indexOf(value) === index);
   }, [end, props.chapter.paragraphs, props.paragraphIndex, props.selectedImage, start]);
-  const bookImageCount = contextImageUris.length;
+  const contextNotes = useMemo(() => {
+    const values: NoteReference[] = [];
+    const seen = new Set<string>();
+    for (let index = start; index < end; index++) {
+      for (const note of noteReferenceItemsIn(props.chapter.paragraphs[index], props.chapter.notes)) {
+        if (!seen.has(note.id)) { seen.add(note.id); values.push(note); }
+      }
+    }
+    return values;
+  }, [end, props.chapter.notes, props.chapter.paragraphs, start]);
   const hasStartedConversation = loading || !!answer || conversationMessages.length > 0;
   const showConversationSetup = !hasStartedConversation;
   if (!props.visible) return null;
@@ -155,17 +185,30 @@ export function AIPanel(props: AIPanelProps) {
             <Pressable onPress={close} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
           </View>
           <ScrollView style={styles.aiScroll} contentContainerStyle={styles.aiScrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <AIContextCard
+              palette={props.palette}
+              label="正在阅读"
+              position={props.paragraphIndex}
+              excerpt={excerpt}
+              excerptIsImage={excerptIsImage}
+              imageUris={contextImageUris}
+              notes={contextNotes}
+              requestText={requestText || buildAIRequestText({
+                bookTitle: props.bookTitle,
+                bookAuthor: props.bookAuthor,
+                bookDescription: props.bookDescription,
+                chapter: props.chapter,
+                paragraphIndex: props.paragraphIndex,
+                selectedText: props.selectedText,
+                selectedImage: props.selectedImage,
+                intent: 'question',
+                question: question.trim() || undefined,
+                contextRadius,
+                imageCount: contextImageUris.length,
+              })}
+              onImagePress={openImagePreview}
+            />
             {showConversationSetup && <>
-               <View style={[styles.contextCard, { backgroundColor: props.palette.surfaceAlt, borderLeftColor: props.palette.accent }]}>
-                 <View style={styles.contextLabelRow}><Text style={[styles.contextLabel, { color: props.palette.accent }]}>正在阅读 · 位置 {props.paragraphIndex + 1}</Text><Text style={[styles.contextRange, { color: props.palette.muted }]}>{bookImageCount} 张图片</Text></View>
-                 <Text numberOfLines={3} style={[styles.contextText, { color: props.palette.text }]}>{excerptIsImage ? '当前是一幅插图，AI 将结合图片内容理解。' : excerpt}</Text>
-                 {!!contextImageUris.length && <ScrollView horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.contextImages}>
-                   {contextImageUris.map((uri, index) => <Pressable key={`${index}-${uri.slice(0, 32)}`} accessibilityLabel={`放大查看上下文图片 ${index + 1}`} onPress={() => openImagePreview(uri)} style={({ pressed }) => [styles.contextImagePress, pressed && styles.pressed]}>
-                     <Image source={{ uri }} style={[styles.contextImage, { borderColor: props.palette.line }]} />
-                     <View style={[styles.contextImageIndex, { backgroundColor: props.palette.scrim }]}><Text style={[styles.contextImageIndexText, { color: props.palette.onAccent }]}>{index + 1}</Text></View>
-                   </Pressable>)}
-                 </ScrollView>}
-               </View>
                <View style={styles.contextSliderHead}>
                  <Text style={[styles.contextControlLabel, { color: props.palette.muted }]}>上下文范围</Text>
                  <Text style={[styles.contextSliderValue, { color: props.palette.accent }]}>前后 {contextRadius} 个内容块</Text>
@@ -175,7 +218,7 @@ export function AIPanel(props: AIPanelProps) {
                  minimumValue={1}
                  maximumValue={20}
                  step={1}
-                 onValueChange={(value) => { setContextRadius(Math.round(value)); setAnswer(''); }}
+                 onValueChange={(value) => { setContextRadius(Math.round(value)); setAnswer(''); setRequestText(''); }}
                  minimumTrackTintColor={props.palette.accent}
                  maximumTrackTintColor={props.palette.line}
                  thumbTintColor={props.palette.accent}
@@ -194,7 +237,7 @@ export function AIPanel(props: AIPanelProps) {
                 </View>
              )}
             {conversationMessages.map((message, index) => message.role === 'user' ? (
-              <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, { backgroundColor: props.palette.focus }]}>
+              <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, index === 0 && styles.historyFirstQuestionBlock, { backgroundColor: props.palette.focus }]}>
                 <Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
                 <Text style={[styles.messageTime, styles.questionMessageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, sessionCreatedAt.current)}</Text>
               </View>

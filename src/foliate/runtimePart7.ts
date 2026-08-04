@@ -96,7 +96,13 @@ export const FOLIATE_BRIDGE_PART_7 = String.raw`hanged.find(point => point.ident
         const EventType = doc.defaultView?.Event;
         if (EventType) doc.dispatchEvent(new EventType('pointerup'));
       } catch {}
-      const image = target?.closest?.('img');
+      const image = imageFromTarget(target);
+      const noteAnchor = image?.closest?.('a[href]');
+      if (image && isNoteLink(noteAnchor)) {
+        suppressClickUntil = 0;
+        noteAnchor.click?.();
+        return true;
+      }
       if (image) {
         const range = doc.createRange();
         range.selectNode(image);
@@ -138,6 +144,167 @@ export const FOLIATE_BRIDGE_PART_7 = String.raw`hanged.find(point => point.ident
       let cfi = '';
       try { cfi = state.view?.getCFI?.(index, selectedRange) || ''; } catch {}
       send({ type: 'long-press', cfi, sectionIndex: index, text: text.slice(0, 1600), kind: 'text' });
+      return true;
+    };
+    const ensureImageViewer = () => {
+      const root = document.getElementById('image-viewer');
+      const surface = document.getElementById('image-viewer-surface');
+      const image = document.getElementById('image-viewer-image');
+      if (!root || !surface || !image) return null;
+      if (root.__mowenImageViewer) return root.__mowenImageViewer;
+      const viewer = {
+        root,
+        surface,
+        image,
+        scale: 1,
+        panX: 0,
+        panY: 0,
+        mode: '',
+        startX: 0,
+        startY: 0,
+        startPanX: 0,
+        startPanY: 0,
+        startScale: 1,
+        pinchDistance: 0,
+        startMidpoint: null,
+        moved: false,
+        lastTapAt: 0,
+        token: 0,
+      };
+      const touchPoint = touch => ({ x: Number(touch?.clientX) || 0, y: Number(touch?.clientY) || 0 });
+      const midpoint = (first, second) => ({ x: (first.clientX + second.clientX) / 2, y: (first.clientY + second.clientY) / 2 });
+      const distance = (first, second) => Math.max(1, Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY));
+      const render = () => {
+        viewer.scale = Math.max(1, Math.min(4, viewer.scale));
+        const imageWidth = image.offsetWidth || image.clientWidth || surface.clientWidth;
+        const imageHeight = image.offsetHeight || image.clientHeight || surface.clientHeight;
+        const limitX = Math.max(0, (imageWidth * viewer.scale - surface.clientWidth) / 2 + 64);
+        const limitY = Math.max(0, (imageHeight * viewer.scale - surface.clientHeight) / 2 + 64);
+        viewer.panX = Math.max(-limitX, Math.min(limitX, viewer.panX));
+        viewer.panY = Math.max(-limitY, Math.min(limitY, viewer.panY));
+        image.style.transform = 'translate3d(' + viewer.panX + 'px,' + viewer.panY + 'px,0) scale(' + viewer.scale + ')';
+      };
+      const close = () => {
+        viewer.token++;
+        viewer.mode = '';
+        root.classList.remove('open');
+        root.setAttribute('aria-hidden', 'true');
+        image.removeAttribute('src');
+        emitNavigationState();
+      };
+      const toggleZoom = () => {
+        viewer.scale = viewer.scale > 1.05 ? 1 : 2;
+        if (viewer.scale === 1) { viewer.panX = 0; viewer.panY = 0; }
+        render();
+      };
+      surface.addEventListener('touchstart', event => {
+        if (!root.classList.contains('open')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const touches = Array.from(event.touches || []);
+        if (touches.length >= 2) {
+          viewer.mode = 'pinch';
+          viewer.pinchDistance = distance(touches[0], touches[1]);
+          viewer.startScale = viewer.scale;
+          viewer.startMidpoint = midpoint(touches[0], touches[1]);
+          viewer.startPanX = viewer.panX;
+          viewer.startPanY = viewer.panY;
+          viewer.moved = true;
+          return;
+        }
+        const point = touches[0];
+        if (!point) return;
+        const start = touchPoint(point);
+        viewer.mode = viewer.scale > 1.01 ? 'pan' : 'tap';
+        viewer.startX = start.x;
+        viewer.startY = start.y;
+        viewer.startPanX = viewer.panX;
+        viewer.startPanY = viewer.panY;
+        viewer.moved = false;
+      }, { passive: false });
+      surface.addEventListener('touchmove', event => {
+        if (!root.classList.contains('open')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const touches = Array.from(event.touches || []);
+        if (touches.length >= 2 && viewer.mode === 'pinch') {
+          const center = midpoint(touches[0], touches[1]);
+          viewer.scale = viewer.startScale * distance(touches[0], touches[1]) / viewer.pinchDistance;
+          viewer.panX = viewer.startPanX + center.x - viewer.startMidpoint.x;
+          viewer.panY = viewer.startPanY + center.y - viewer.startMidpoint.y;
+          render();
+          return;
+        }
+        if (touches.length !== 1) return;
+        const point = touchPoint(touches[0]);
+        if (Math.hypot(point.x - viewer.startX, point.y - viewer.startY) > 8) viewer.moved = true;
+        if (viewer.mode === 'pan') {
+          viewer.panX = viewer.startPanX + point.x - viewer.startX;
+          viewer.panY = viewer.startPanY + point.y - viewer.startY;
+          render();
+        }
+      }, { passive: false });
+      surface.addEventListener('touchend', event => {
+        if (!root.classList.contains('open')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const control = event.target?.closest?.('#image-viewer-close');
+        if (control?.id === 'image-viewer-close') { close(); return; }
+        const touches = Array.from(event.touches || []);
+        if (touches.length >= 2) return;
+        if (touches.length === 1) {
+          const point = touchPoint(touches[0]);
+          viewer.mode = viewer.scale > 1.01 ? 'pan' : 'tap';
+          viewer.startX = point.x;
+          viewer.startY = point.y;
+          viewer.startPanX = viewer.panX;
+          viewer.startPanY = viewer.panY;
+          return;
+        }
+        if (viewer.mode === 'tap' && !viewer.moved) {
+          if (event.target === surface) { close(); return; }
+          const now = Date.now();
+          if (now - viewer.lastTapAt < 320) toggleZoom();
+          viewer.lastTapAt = now;
+        }
+        viewer.mode = '';
+      }, { passive: false });
+      surface.addEventListener('touchcancel', event => {
+        event.preventDefault();
+        viewer.mode = '';
+      }, { passive: false });
+      surface.addEventListener('click', event => {
+        if (event.target === surface) close();
+      });
+      image.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleZoom();
+      });
+      document.getElementById('image-viewer-close')?.addEventListener('click', close);
+      image.addEventListener('load', render);
+      viewer.close = close;
+      root.__mowenImageViewer = viewer;
+      return viewer;
+    };
+    const openImageViewer = image => {
+      const viewer = ensureImageViewer();
+      const source = image?.currentSrc || image?.src || '';
+      if (!viewer || !source) return false;
+      const token = ++viewer.token;
+      viewer.scale = 1;
+      viewer.panX = 0;
+      viewer.panY = 0;
+      viewer.lastTapAt = 0;
+      viewer.image.alt = image.getAttribute?.('alt') || '正文图片';
+      viewer.image.src = source;
+      viewer.root.classList.add('open');
+      viewer.root.setAttribute('aria-hidden', 'false');
+      viewer.image.style.transform = 'translate3d(0,0,0) scale(1)';
+      emitNavigationState();
+      void imageDataOf(image).then(data => {
+        if (data && viewer.token === token && viewer.root.classList.contains('open')) viewer.image.src = data;
+      }).catch(() => {});
       return true;
     };
     const handleTap = screenX => {

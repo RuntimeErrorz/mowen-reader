@@ -76,7 +76,8 @@ function stripHtml(
       const id = href.includes('#') ? href.split('#').pop() ?? '' : '';
       if (id && globalNotes[id]) {
         notes[id] = globalNotes[id];
-        return `[[MOWEN_NOTE_REF:${id}]]`;
+        const label = decode(inner.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).match(/(?:\(\s*\d{1,3}\s*\)|（\s*\d{1,3}\s*）|\[\s*\d{1,3}\s*\]|［\s*\d{1,3}\s*］|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)/u)?.[0] || '';
+        return `[[MOWEN_NOTE_REF:${id}${label ? `|${encodeURIComponent(label)}` : ''}]]`;
       }
       return inner;
     })

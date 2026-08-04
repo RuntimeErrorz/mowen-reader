@@ -1,16 +1,11 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, FlatList, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
-import * as Haptics from 'expo-haptics';
+import { Animated, FlatList, Modal, Platform, Pressable, ScrollView, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import Markdown from 'react-native-markdown-display';
 import Slider from '@react-native-community/slider';
-import { askAI } from '../../ai';
-import { AIConversation, AIMessage, AISettings, Bookmark, Book, ReaderPrefs } from '../../types';
+import { AIConversation, Bookmark, ReaderPrefs } from '../../types';
 import { getReaderPalette, ReaderPalette } from '../../ui/theme';
-import { markdownStyles, styles } from '../../ui/styles';
+import { styles } from '../../ui/styles';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
-import { formatMessageTime, themedMarkdownStyles } from './readerUtils';
-import { useKeyboardVisibility } from './useKeyboardVisibility';
 
 export function TOCModal({ palette, visible, chapters, current, onChoose, onClose }: { palette: ReaderPalette; visible: boolean; chapters: string[]; current: number; onChoose: (index: number) => void; onClose: () => void }) {
   const listRef = useRef<FlatList<string>>(null);
@@ -113,123 +108,6 @@ export function BookmarksModal(props: {
           }}
         />}
       </DraggableSheet>
-    </Modal>
-  );
-}
-
-export function ConversationViewerModal(props: {
-  conversation: AIConversation | null;
-  book: Book;
-  settings: AISettings;
-  palette: ReaderPalette;
-  onUpdate: (conversation: AIConversation) => void;
-  onReturn: () => void;
-  onStay: () => void;
-}) {
-  const [messages, setMessages] = useState<AIMessage[]>([]);
-  const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [answerTimestamp, setAnswerTimestamp] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const controller = useRef<AbortController | null>(null);
-  const scrollRef = useRef<ScrollView>(null);
-  const keyboardVisible = useKeyboardVisibility(!!props.conversation);
-  useEffect(() => {
-    if (!props.conversation) return;
-    setMessages(props.conversation.messages);
-    setQuestion(''); setAnswer(''); setAnswerTimestamp(null); setError(''); setLoading(false);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
-    return () => controller.current?.abort();
-  }, [props.conversation?.id]);
-  if (!props.conversation) return null;
-  const conversation = props.conversation;
-  const chapter = props.book.chapters[conversation.chapterIndex];
-  const continueConversation = async () => {
-    const text = question.trim();
-    if (!text || loading) return;
-    if (!props.settings.apiKey.trim()) { setError('模型密钥不可用，请先在设置中配置。'); return; }
-    const priorMessages = messages;
-    const userCreatedAt = Date.now();
-    const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text, createdAt: userCreatedAt }];
-    setMessages(pendingMessages);
-    setQuestion(''); setAnswer(''); setAnswerTimestamp(Date.now()); setLoading(true); setError('');
-    controller.current?.abort();
-    controller.current = new AbortController();
-    try {
-      const answer = await askAI({
-        settings: props.settings,
-        bookTitle: props.book.title,
-        bookAuthor: props.book.author,
-        bookDescription: props.book.description,
-        chapter,
-        paragraphIndex: conversation.paragraphIndex,
-        contextRadius: conversation.contextRadius,
-        intent: 'question',
-        question: text,
-        history: priorMessages,
-        signal: controller.current.signal,
-        onDelta: (delta) => setAnswer((current) => current + delta),
-      });
-      const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: answer, createdAt: Date.now() }];
-      setMessages(next); setAnswer(''); setAnswerTimestamp(null);
-      props.onUpdate({ ...conversation, messages: next, updatedAt: Date.now() });
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
-    } catch (cause) {
-      setAnswerTimestamp(null);
-      if ((cause as Error).name === 'AbortError') return;
-      setError(cause instanceof Error ? cause.message : '继续对话失败');
-    } finally { setLoading(false); }
-  };
-  const stay = () => {
-    Keyboard.dismiss();
-    props.onStay();
-  };
-  const returnToAnchor = () => {
-    Keyboard.dismiss();
-    props.onReturn();
-  };
-  return (
-    <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={stay}>
-      <View style={styles.aiOverlayRoot}>
-        <SheetBackdrop palette={props.palette} onPress={stay} />
-        <KeyboardAvoidingView pointerEvents="box-none" behavior={Platform.OS === 'ios' ? 'padding' : keyboardVisible ? 'height' : undefined} style={styles.modalRoot}>
-        <DraggableSheet visible onClose={stay} palette={props.palette} fillBelow showScrim={false} style={[styles.aiSheet, styles.aiSheetExpanded]}>
-          <View style={[styles.historyHeader, { borderBottomColor: props.palette.line }]}>
-            <View style={{ flex: 1 }}><Text numberOfLines={1} style={[styles.historyChapter, { color: props.palette.text }]}>{conversation.chapterTitle}</Text></View>
-            <Pressable onPress={returnToAnchor} style={[styles.returnButton, { borderColor: props.palette.line }]}><Ionicons name="arrow-undo" size={16} color={props.palette.accent} /><Text style={[styles.returnButtonText, { color: props.palette.accent }]}>返回原处</Text></Pressable>
-          </View>
-          <View style={[styles.historyAnchor, { backgroundColor: props.palette.surfaceAlt, borderLeftColor: props.palette.accent }]}>
-            <Text style={[styles.historyAnchorLabel, { color: props.palette.accent }]}>当时的原文 · 位置 {conversation.paragraphIndex + 1}</Text>
-            <Text numberOfLines={3} style={[styles.historyAnchorText, { color: props.palette.text }]}>{conversation.anchorExcerpt}</Text>
-          </View>
-          <ScrollView ref={scrollRef} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-            {messages.map((message, index) => message.role === 'user' ? (
-              <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, { backgroundColor: props.palette.focus }]}>
-                <Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
-                <Text style={[styles.messageTime, styles.questionMessageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
-              </View>
-            ) : (
-              <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
-                <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
-              </View>
-            ))}
-            {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-              <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
-              <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(answerTimestamp ?? undefined, conversation.createdAt)}</Text>
-            </View>}
-            {loading && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>正在生成回复…</Text></View>}
-            {!!error && <Text style={[styles.historyError, { color: props.palette.text, backgroundColor: props.palette.surfaceAlt }]}>{error}</Text>}
-          </ScrollView>
-          <View style={[styles.historyComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
-            <TextInput value={question} onChangeText={setQuestion} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.historyInput, { backgroundColor: props.palette.control, borderColor: props.palette.line, color: props.palette.text }]} />
-            <Pressable disabled={!question.trim() || loading} onPress={continueConversation} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
-          </View>
-        </DraggableSheet>
-        </KeyboardAvoidingView>
-      </View>
     </Modal>
   );
 }

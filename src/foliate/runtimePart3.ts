@@ -31,6 +31,14 @@ export const FOLIATE_BRIDGE_PART_3 = String.raw`    } catch {}
     let bookmarkSelectionTouch = null;
     let bookmarkSelectionTimer = 0;
     const interactive = target => target?.closest?.('a[href],button,input,textarea,select,label');
+    const imageFromTarget = target => {
+      if (target?.nodeType === 3) target = target.parentElement;
+      if (target?.tagName?.toLowerCase?.() === 'img') return target;
+      return target?.closest?.('img') || null;
+    };
+    const imageFromEvent = event => imageFromTarget(event?.target)
+      || event?.composedPath?.().map(imageFromTarget).find(Boolean)
+      || null;
     const longPressBlocked = target => target?.closest?.('button,input,textarea,select,label');
     const screenWidth = () => Math.max(1, doc.defaultView?.screen?.width || globalThis.screen?.width || state.view?.renderer?.size || 1);
     const touchCoordinates = point => ({

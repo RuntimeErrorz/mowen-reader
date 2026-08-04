@@ -139,8 +139,13 @@ export const FOLIATE_BRIDGE_PART_9 = String.raw`uch.clientY;
       if (!touch) return;
       const finished = touch;
       touch = null;
+      const image = finished.image || imageFromEvent(event) || imageFromTarget(finished.target);
+      const noteImage = image && isNoteLink(image.closest?.('a[href]'));
+      const endedPoint = Array.from(event.changedTouches || []).find(point => point.identifier === finished.identifier)
+        || Array.from(event.changedTouches || [])[0];
+      const imageTap = !!image && (!endedPoint || Math.hypot(endedPoint.clientX - finished.x, endedPoint.clientY - finished.y) <= 14);
       const pageResult = state.config?.prefs.readingMode === 'paged'
-        ? pager.end()
+        ? imageTap ? (pager.cancel(), { moved: false, committed: false }) : pager.end()
         : { moved: false, committed: false };
       if (state.config?.prefs.readingMode === 'paged') event.stopImmediatePropagation();
       if (pageResult.moved) {
@@ -153,8 +158,16 @@ export const FOLIATE_BRIDGE_PART_9 = String.raw`uch.clientY;
         queueScrolledBoundaryCheck();
       }
       if (finished.longPressed) { event.preventDefault(); return; }
-      if (finished.moved || Date.now() - finished.started > 500 || interactive(finished.target)) return;
+      if ((finished.moved && !imageTap) || Date.now() - finished.started > 500 || (interactive(finished.target) && !image)) return;
       if (doc.getSelection?.()?.toString?.().trim()) return;
+      if (noteImage && imageTap) return;
+      if (image) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        suppressClickUntil = Date.now() + 700;
+        openImageViewer(image);
+        return;
+      }
       event.preventDefault();
       suppressClickUntil = Date.now() + 500;
       doc.defaultView?.requestAnimationFrame(() => doc.defaultView?.requestAnimationFrame(() => handleTap(finished.screenX)));

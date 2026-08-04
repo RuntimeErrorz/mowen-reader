@@ -19,6 +19,10 @@ export const FOLIATE_BRIDGE_PART_11 = String.raw`?.trim() || ranged.querySelecto
     emitNavigationState();
   };
   const back = () => {
+    if (imageViewerIsOpen()) {
+      document.getElementById('image-viewer')?.__mowenImageViewer?.close?.();
+      return true;
+    }
     if (noteIsOpen()) {
       closeNote();
       return true;

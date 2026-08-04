@@ -121,12 +121,14 @@ export const FOLIATE_BRIDGE_PART_8 = String.raw`identifier !== heldHandle.id && 
       doc.getSelection?.()?.removeAllRanges?.();
       const point = event.touches[0];
       touch = {
+        identifier: point.identifier,
         x: point.clientX,
         y: point.clientY,
         lastScreenY: point.screenY,
         screenX: point.screenX,
         started: Date.now(),
         target: event.target,
+        image: imageFromEvent(event),
         moved: false,
         longPressed: false
       };
@@ -146,7 +148,7 @@ export const FOLIATE_BRIDGE_PART_8 = String.raw`identifier !== heldHandle.id && 
           pager.cancel();
           suppressClickUntil = Date.now() + 700;
           globalThis.navigator?.vibrate?.(24);
-          void emitLongPress(touch.target);
+          void emitLongPress(touch.image || touch.target);
         }, 520) || 0;
       }
     }, { passive: false, capture: true });

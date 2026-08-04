@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, BackHandler, Pressable, StatusBar as NativeStatusBar, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { FoliateBookmarkSelection, FoliateLocation, FoliateLongPress, FoliateReader, FoliateReaderHandle, FoliateSearchResult, FoliateTOCItem } from '../../FoliateReader';
+import { paragraphMatchesSelection } from '../../aiContext';
 import { AIConversation, AISettings, Book, Bookmark, BookSummary, EpubLocator, ReaderPrefs } from '../../types';
 import { getReaderPalette } from '../../ui/theme';
 import { styles } from '../../ui/styles';
 import { AIPanel } from './AIPanel';
-import { BookmarksModal, ConversationViewerModal, ReaderToolbar, TOCModal, TypeModal } from './ReaderOverlays';
+import { BookmarksModal, ReaderToolbar, TOCModal, TypeModal } from './ReaderOverlays';
+import { ConversationViewerModal } from './ConversationViewerModal';
 import { SearchModal } from './SearchModal';
 
 export type ReaderScreenProps = {
@@ -45,7 +47,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   const [activeHistory, setActiveHistory] = useState<AIConversation | null>(null);
   const [chromeVisible, setChromeVisible] = useState(false);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
-  const [readerNavigation, setReaderNavigation] = useState({ canGoBack: false, noteOpen: false });
+  const [readerNavigation, setReaderNavigation] = useState({ canGoBack: false, noteOpen: false, imageOpen: false });
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<FoliateSearchResult[]>([]);
@@ -102,13 +104,9 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
       nextParagraph = 0;
     }
     if (selection.kind === 'text' && selection.text.trim()) {
-      const needle = selection.text.replace(/\s+/g, '').slice(0, 80);
       const candidates = [nextChapter, ...props.book.chapters.map((_item, index) => index).filter((index) => index !== nextChapter)];
       for (const candidate of candidates) {
-        const found = props.book.chapters[candidate]?.paragraphs.findIndex((paragraph) => {
-          const normalized = paragraph.replace(/\[\[MOWEN_[^\]]+\]\]/g, '').replace(/\s+/g, '');
-          return !!needle && (normalized.includes(needle) || needle.includes(normalized.slice(0, 80)));
-        }) ?? -1;
+        const found = props.book.chapters[candidate]?.paragraphs.findIndex((paragraph) => paragraphMatchesSelection(paragraph, selection.text)) ?? -1;
         if (found >= 0) { nextChapter = candidate; nextParagraph = found; break; }
       }
     }
@@ -254,10 +252,9 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
     if (!bookmarkSelection?.cfi || !bookmarkSelection.text.trim()) return;
     let nextChapter = Math.min(props.book.chapters.length - 1, Math.max(0, bookmarkSelection.sectionIndex));
     let nextParagraph = 0;
-    const needle = bookmarkSelection.text.replace(/\s+/g, '').slice(0, 80);
     const candidates = [nextChapter, ...props.book.chapters.map((_item, index) => index).filter((index) => index !== nextChapter)];
     for (const candidate of candidates) {
-      const found = props.book.chapters[candidate]?.paragraphs.findIndex((paragraph) => paragraph.replace(/\[\[MOWEN_[^\]]+\]\]/g, '').replace(/\s+/g, '').includes(needle)) ?? -1;
+      const found = props.book.chapters[candidate]?.paragraphs.findIndex((paragraph) => paragraphMatchesSelection(paragraph, bookmarkSelection.text)) ?? -1;
       if (found >= 0) { nextChapter = candidate; nextParagraph = found; break; }
     }
     const selectedChapter = props.book.chapters[nextChapter] ?? chapter;
@@ -292,6 +289,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (bookmarkSelecting) { cancelBookmarkSelection(); return true; }
+      if (readerNavigation.imageOpen) { readerRef.current?.back(); return true; }
       if (readerNavigation.noteOpen) { readerRef.current?.back(); return true; }
       if (activeHistory) { closeConversation(); return true; }
       if (aiOpen) { setAiOpen(false); return true; }
@@ -305,18 +303,19 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
       return true;
     });
     return () => subscription.remove();
-  }, [activeHistory, aiOpen, bookmarkSelecting, bookmarksOpen, chromeAnim, chromeVisible, closeConversation, closeSearchPanel, props.onBack, readerNavigation.canGoBack, readerNavigation.noteOpen, searchOpen, tocOpen, typeOpen]);
+  }, [activeHistory, aiOpen, bookmarkSelecting, bookmarksOpen, chromeAnim, chromeVisible, closeConversation, closeSearchPanel, props.onBack, readerNavigation.canGoBack, readerNavigation.imageOpen, readerNavigation.noteOpen, searchOpen, tocOpen, typeOpen]);
   const modalOverlayVisible = aiOpen || !!activeHistory || searchOpen;
+  const imageViewerOpen = readerNavigation.imageOpen;
 
   return (
-    <View style={[styles.readerRoot, { backgroundColor: palette.bg }]}>
-      <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.reader, { backgroundColor: palette.bg }]}>
-        <NativeStatusBar backgroundColor={palette.bg} barStyle={modalOverlayVisible || props.prefs.theme === 'night' ? 'light-content' : 'dark-content'} />
+    <View style={[styles.readerRoot, { backgroundColor: imageViewerOpen ? '#000' : palette.bg }]}>
+      <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.reader, { backgroundColor: imageViewerOpen ? '#000' : palette.bg }]}>
+        <NativeStatusBar backgroundColor={imageViewerOpen ? '#000' : palette.bg} barStyle={imageViewerOpen || modalOverlayVisible || props.prefs.theme === 'night' ? 'light-content' : 'dark-content'} />
         <FoliateReader ref={readerRef} epubUri={props.epubUri} title={props.book.title} bookmarks={props.bookmarks} prefs={props.prefs} palette={palette} initialCfi={initialCfi.current} initialProgress={props.summary.progress} onReady={setToc} onLocationChange={handleLocationChange} onCenterTap={toggleChrome} onLongPress={handleLongPress} onBookmarkSelection={setBookmarkSelection} onBookmarkSelectionModeChange={(active) => { setBookmarkSelecting(active); if (!active) setBookmarkSelection(null); if (active) { setChromeVisible(false); chromeAnim.setValue(0); } }} onNavigationStateChange={setReaderNavigation} onSearchResults={handleSearchResults} onSearchProgress={handleSearchProgress} onSearchComplete={handleSearchComplete} onSearchError={handleSearchError} onError={(message) => Alert.alert('Foliate 无法打开 EPUB', message)} />
-        {!!location && !chromeVisible && !readerNavigation.noteOpen && <Text pointerEvents="none" style={{ position: 'absolute', right: Math.max(16, props.prefs.pagePaddingRight), bottom: 16, color: palette.muted, fontSize: 11 }}>{location.position} / {location.totalPositions}</Text>}
-        {!readerNavigation.noteOpen && <ReaderToolbar visible={chromeVisible} animation={chromeAnim} palette={palette} progress={exactProgress} chapter={chapterIndex} chapterCount={Math.max(1, toc.length || props.book.chapters.length)} marginCount={props.bookmarks.length + props.conversations.length} onBack={props.onBack} onContents={() => setTocOpen(true)} onSearch={openSearch} onAppearance={() => setTypeOpen(true)} onMargins={() => setBookmarksOpen(true)} onProgressStart={beginProgressDrag} onProgressMove={moveProgressDrag} onProgressEnd={finishProgressDrag} />}
-        {bookmarkSelecting && !readerNavigation.noteOpen && <View style={styles.bookmarkSelectionActions}><Pressable accessibilityLabel="取消摘录" onPress={cancelBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.control, borderColor: palette.line }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.muted }]}>取消</Text></Pressable><Pressable accessibilityLabel="保存摘录书签" disabled={!bookmarkSelection?.cfi} onPress={saveBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.accent, borderColor: palette.accent }, !bookmarkSelection?.cfi && { opacity: 0.4 }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.onAccent }]}>标记</Text></Pressable></View>}
-        {dragProgress !== null && !readerNavigation.noteOpen && <View pointerEvents="none" style={[styles.liveProgressCard, { backgroundColor: palette.bar, borderColor: palette.line }]}><View style={styles.liveProgressTop}><Text style={[styles.liveProgressLabel, { color: palette.accent }]}>全书进度</Text><Text style={[styles.liveProgressPercent, { color: palette.text }]}>{Math.round(dragProgress * 100)}%</Text></View><Text numberOfLines={1} style={[styles.liveProgressChapter, { color: palette.text }]}>{chapter.title}</Text><View style={[styles.liveProgressTrack, { backgroundColor: palette.line }]}><View style={[styles.liveProgressFill, { backgroundColor: palette.accent, width: `${dragProgress * 100}%` }]} /></View></View>}
+        {!!location && !chromeVisible && !readerNavigation.noteOpen && !imageViewerOpen && <Text pointerEvents="none" style={{ position: 'absolute', right: Math.max(16, props.prefs.pagePaddingRight), bottom: 16, color: palette.muted, fontSize: 11 }}>{location.position} / {location.totalPositions}</Text>}
+        {!readerNavigation.noteOpen && !imageViewerOpen && <ReaderToolbar visible={chromeVisible} animation={chromeAnim} palette={palette} progress={exactProgress} chapter={chapterIndex} chapterCount={Math.max(1, toc.length || props.book.chapters.length)} marginCount={props.bookmarks.length + props.conversations.length} onBack={props.onBack} onContents={() => setTocOpen(true)} onSearch={openSearch} onAppearance={() => setTypeOpen(true)} onMargins={() => setBookmarksOpen(true)} onProgressStart={beginProgressDrag} onProgressMove={moveProgressDrag} onProgressEnd={finishProgressDrag} />}
+        {bookmarkSelecting && !readerNavigation.noteOpen && !imageViewerOpen && <View style={styles.bookmarkSelectionActions}><Pressable accessibilityLabel="取消摘录" onPress={cancelBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.control, borderColor: palette.line }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.muted }]}>取消</Text></Pressable><Pressable accessibilityLabel="保存摘录书签" disabled={!bookmarkSelection?.cfi} onPress={saveBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.accent, borderColor: palette.accent }, !bookmarkSelection?.cfi && { opacity: 0.4 }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.onAccent }]}>标记</Text></Pressable></View>}
+        {dragProgress !== null && !readerNavigation.noteOpen && !imageViewerOpen && <View pointerEvents="none" style={[styles.liveProgressCard, { backgroundColor: palette.bar, borderColor: palette.line }]}><View style={styles.liveProgressTop}><Text style={[styles.liveProgressLabel, { color: palette.accent }]}>全书进度</Text><Text style={[styles.liveProgressPercent, { color: palette.text }]}>{Math.round(dragProgress * 100)}%</Text></View><Text numberOfLines={1} style={[styles.liveProgressChapter, { color: palette.text }]}>{chapter.title}</Text><View style={[styles.liveProgressTrack, { backgroundColor: palette.line }]}><View style={[styles.liveProgressFill, { backgroundColor: palette.accent, width: `${dragProgress * 100}%` }]} /></View></View>}
         <TOCModal palette={palette} visible={tocOpen} chapters={(toc.length ? toc.map((item) => `${'　'.repeat(item.depth)}${item.label}`) : props.book.chapters.map((item) => item.title))} current={currentToc} onChoose={chooseToc} onClose={() => setTocOpen(false)} />
         <TypeModal visible={typeOpen} value={props.prefs} onChange={props.onPrefs} onClose={() => setTypeOpen(false)} />
         <BookmarksModal visible={bookmarksOpen} bookmarks={props.bookmarks} chapterTitle={chapter.title} paragraphIndex={paragraphIndex} onChoose={(bookmark) => { setBookmarksOpen(false); if (bookmark.locator?.type === 'application/epub+cfi') readerRef.current?.goTo(bookmark.locator.href); else goToChapter(bookmark.chapterIndex); }} onDelete={deleteBookmark} conversations={props.conversations} onChooseConversation={openConversation} onDeleteConversation={props.onConversationDelete} onClose={() => setBookmarksOpen(false)} palette={palette} />

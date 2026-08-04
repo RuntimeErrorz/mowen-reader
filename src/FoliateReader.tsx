@@ -86,7 +86,7 @@ type Props = {
   onLongPress: (selection: FoliateLongPress) => void;
   onBookmarkSelection: (selection: FoliateBookmarkSelection) => void;
   onBookmarkSelectionModeChange: (active: boolean) => void;
-  onNavigationStateChange: (state: { canGoBack: boolean; noteOpen: boolean }) => void;
+  onNavigationStateChange: (state: { canGoBack: boolean; noteOpen: boolean; imageOpen: boolean }) => void;
   onSearchResults: (payload: { requestId: number; sectionIndex: number; sectionTitle: string; results: FoliateSearchResult[] }) => void;
   onSearchProgress: (payload: { requestId: number; progress: number }) => void;
   onSearchComplete: (requestId: number) => void;
@@ -105,7 +105,7 @@ type HostMessage =
   | { type: 'image-transfer-start'; transferId: string }
   | { type: 'image-transfer-chunk'; transferId: string; chunk: string }
   | { type: 'image-transfer-end'; transferId: string }
-  | { type: 'navigation-state'; canGoBack: boolean; noteOpen: boolean }
+  | { type: 'navigation-state'; canGoBack: boolean; noteOpen: boolean; imageOpen: boolean }
   | { type: 'search-results'; requestId: number; sectionIndex: number; sectionTitle: string; results: FoliateSearchResult[] }
   | { type: 'search-progress'; requestId: number; progress: number }
   | { type: 'search-complete'; requestId: number }
@@ -236,7 +236,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
       return;
     }
     if (message.type === 'navigation-state') {
-      props.onNavigationStateChange({ canGoBack: message.canGoBack, noteOpen: message.noteOpen });
+      props.onNavigationStateChange({ canGoBack: !!message.canGoBack, noteOpen: !!message.noteOpen, imageOpen: !!message.imageOpen });
       return;
     }
     if (message.type === 'search-results') {

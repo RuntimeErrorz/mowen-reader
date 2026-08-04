@@ -1,5 +1,6 @@
 import { AIMessage, AISettings, Chapter } from './types';
 import * as FileSystem from 'expo-file-system/legacy';
+import { expandNoteReferences, expandSelectedTextWithNotes } from './aiContext';
 
 export type AIIntent = 'explain' | 'thread' | 'simple' | 'question';
 
@@ -13,6 +14,47 @@ const intentText: Record<AIIntent, string> = {
   simple: '用更直白的中文改写，并给一个贴切的小例子。',
   question: '回答读者的问题；如果原文不足以支持结论，要明确说明。',
 };
+
+function isImageMarker(text: string) {
+  return /^\[\[MOWEN_IMAGE_(?:DATA|FILE|EPUB):[\s\S]+\]\]$/.test(text);
+}
+
+export function buildAIRequestText(options: {
+  bookTitle: string;
+  bookAuthor: string;
+  bookDescription?: string;
+  chapter: Chapter;
+  paragraphIndex: number;
+  selectedText?: string;
+  selectedImage?: string;
+  intent: AIIntent;
+  question?: string;
+  contextRadius?: number;
+  imageCount?: number;
+}) {
+  const radius = Math.max(1, Math.min(20, options.contextRadius ?? 5));
+  const start = Math.max(0, options.paragraphIndex - radius);
+  const end = Math.min(options.chapter.paragraphs.length, options.paragraphIndex + radius + 1);
+  const contextParts: string[] = [];
+  for (let index = start; index < end; index++) {
+    const text = options.chapter.paragraphs[index];
+    const current = index === options.paragraphIndex;
+    const expandedText = expandNoteReferences(text, options.chapter.notes);
+    const safeText = current && options.selectedImage?.trim()
+      ? '【当前是一幅插图，见随附图片】'
+      : current && options.selectedText?.trim()
+      ? expandSelectedTextWithNotes(options.selectedText.trim(), text, options.chapter.notes)
+      : isImageMarker(text)
+      ? '【此处有一幅插图，见随附图片】'
+      : expandedText;
+    contextParts.push(`${current ? '【当前段】' : '【上下文】'}${safeText}`);
+  }
+  const bookInfo = options.bookDescription
+    ? `《${options.bookTitle}》，作者：${options.bookAuthor}。书籍简介：${options.bookDescription}`
+    : `《${options.bookTitle}》，作者：${options.bookAuthor}。当前没有可用的 EPUB 书籍简介，请勿自行杜撰。`;
+  const imageHint = options.imageCount ? `\n随附 ${options.imageCount} 张图片，请结合图片中的图表、文字或视觉关系回答。` : '';
+  return `书籍信息：${bookInfo}\n当前章节：${options.chapter.title}\n上下文范围：当前位置前后各 ${radius} 个内容块\n\n${contextParts.join('\n\n')}\n\n任务：${intentText[options.intent]}${options.question ? `\n读者的问题：${options.question}` : ''}${imageHint}`;
+}
 
 function imageMime(uri: string) {
   const extension = uri.split(/[?#]/)[0].split('.').pop()?.toLowerCase();
@@ -143,6 +185,7 @@ export async function askAI(options: {
   chapter: Chapter;
   paragraphIndex: number;
   selectedText?: string;
+  selectedImage?: string;
   intent: AIIntent;
   question?: string;
   contextRadius?: number;
@@ -158,16 +201,20 @@ export async function askAI(options: {
   const contextImages: string[] = [];
   const contextParts: string[] = [];
   const contextParagraphs = chapter.paragraphs.slice(start, end);
+  const resolvedImages = await Promise.all(contextParagraphs.map((text) => resolveImageBlock(text)));
   for (let i = 0; i < contextParagraphs.length; i++) {
     const text = contextParagraphs[i];
     const current = start + i === paragraphIndex;
-    const image = await resolveImageBlock(text);
+    const image = resolvedImages[i];
     if (image && image.length <= 6_000_000) contextImages.push(image);
-    const safeText = current && options.selectedText?.trim()
-      ? options.selectedText.trim()
+    const expandedText = expandNoteReferences(text, chapter.notes);
+    const safeText = current && options.selectedImage?.trim()
+      ? '【当前是一幅插图，见随附图片】'
+      : current && options.selectedText?.trim()
+      ? expandSelectedTextWithNotes(options.selectedText.trim(), text, chapter.notes)
       : image
       ? `【此处有一幅插图${image.length > 6_000_000 ? '，因文件过大未上传' : '，见随附图片'}】`
-      : text.replace(/\[\[MOWEN_NOTE_REF:[^\]]+\]\]/g, '〔脚注〕');
+      : expandedText;
     contextParts.push(`${current ? '【当前段】' : '【上下文】'}${safeText}`);
   }
   const context = contextParts.join('\n\n');
@@ -197,6 +244,7 @@ export async function askAI(options: {
     ...customRequestParams,
     model: settings.model,
     temperature: customRequestParams.temperature ?? 0.35,
+    enable_thinking: customRequestParams.enable_thinking ?? false,
     stream: true,
     messages: [
       { role: 'system', content: systemPrompt },

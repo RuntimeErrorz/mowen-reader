@@ -14,6 +14,7 @@ test('application responsibilities remain split into bounded modules', async () 
     ['src/components/reader/ReaderScreen.tsx', 360],
     ['src/components/reader/ReaderOverlays.tsx', 420],
     ['src/components/reader/AIPanel.tsx', 300],
+    ['src/components/reader/ConversationViewerModal.tsx', 300],
   ];
   for (const [file, maximum] of files) {
     const lines = (await read(file)).split(/\r?\n/).length;
@@ -68,12 +69,12 @@ test('reader utility behavior is preserved after extraction', async () => {
 
 test('keyboard-aware sheets clear Android avoidance after the keyboard hides', async () => {
   const aiPanel = await read('src/components/reader/AIPanel.tsx');
-  const readerOverlays = await read('src/components/reader/ReaderOverlays.tsx');
+  const conversationViewer = await read('src/components/reader/ConversationViewerModal.tsx');
   const searchModal = await read('src/components/reader/SearchModal.tsx');
   const draggableSheet = await read('src/components/reader/DraggableSheet.tsx');
   const keyboardVisibility = await read('src/components/reader/useKeyboardVisibility.ts');
   const uiStyles = await read('src/ui/styles.ts');
-  for (const source of [aiPanel, readerOverlays, searchModal]) {
+  for (const source of [aiPanel, conversationViewer, searchModal]) {
     assert.match(source, /statusBarTranslucent(?=\s|=\{true\})/);
     assert.match(source, /behavior=\{Platform\.OS === 'ios' \? 'padding' : keyboardVisible \? 'height' : undefined\}/);
     assert.match(source, /<SheetBackdrop[\s\S]+<KeyboardAvoidingView/);

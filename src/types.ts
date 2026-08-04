@@ -93,6 +93,9 @@ export type AIConversation = {
   paragraphIndex: number;
   chapterTitle: string;
   anchorExcerpt: string;
+  /** Optional context captured when the conversation was started. */
+  selectedText?: string;
+  selectedImage?: string;
   locator?: EpubLocator;
   contextRadius: number;
   messages: AIMessage[];
