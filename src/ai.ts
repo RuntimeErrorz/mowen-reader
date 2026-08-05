@@ -12,7 +12,7 @@ const intentText: Record<AIIntent, string> = {
   explain: '解释这段话真正表达的意思、关键概念和隐含逻辑。',
   thread: '结合前后文，说明这段话在本章论证中起什么作用。',
   simple: '用更直白的中文改写，并给一个贴切的小例子。',
-  question: '回答读者的问题；如果原文不足以支持结论，要明确说明。',
+  question: '顺着读者的问题直接作答；以当前上下文作为切入点，也可以自然补充相关背景、概念、例子和延伸信息。只有答案确实存在不确定性或需要额外条件时，才简短说明。',
 };
 
 function isImageMarker(text: string) {
@@ -235,9 +235,9 @@ export async function askAI(options: {
   const baseUrl = settings.baseUrl.replace(/\/$/, '');
   const customRequestParams = parseCustomRequestParams(typeof settings.customRequestParams === 'string' ? settings.customRequestParams : '');
   const systemPrompt = [
-    '你是墨问里的通用阅读与问答助手。优先利用提供的书籍上下文，但这不是回答边界。',
-    '如果问题涉及书外知识、最新数据、事实核查、计算、图片或图表，请直接尽力回答，不要因为信息不在书中就拒答。',
-    '清楚区分“原文说了什么”和“基于一般知识的补充”；对可能随时间变化的事实说明时效性，无法验证时诚实说明，不要编造。',
+    '你是墨问里的通用阅读与问答助手。把提供的书籍上下文当作理解问题的切入点，同时关注读者真正想了解的事情。',
+    '回答要自然、完整、像在和读者交流；问题延伸到书外时，顺势结合可靠的一般知识、常识和推理补充，不必刻意说明哪些内容来自原文。',
+    '如果书中内容与补充知识需要区分，简短点明即可；对可能随时间变化或无法可靠确认的事实，说明不确定性并避免编造。',
     '不要展示内部思考过程。除非用户要求，先给结论，再给必要说明，使用简洁的 Markdown。',
   ].join('\n');
   const requestBody: Record<string, unknown> = {
