@@ -128,16 +128,16 @@ export default function App() {
     await saveLibrary(next);
   };
 
-  const removeBook = (item: BookSummary) => {
-    Alert.alert('移出书架？', `“${item.title}”的阅读进度也会删除。`, [
-      { text: '取消', style: 'cancel' },
-      { text: '移出', style: 'destructive', onPress: async () => {
-        await deleteBookFile(item.id);
-        const next = library.filter((bookItem) => bookItem.id !== item.id);
-        setLibrary(next);
-        await saveLibrary(next);
-      } },
-    ]);
+  const removeBook = async (item: BookSummary) => {
+    await deleteBookFile(item.id);
+    const next = library.filter((bookItem) => bookItem.id !== item.id);
+    setLibrary(next);
+    await saveLibrary(next);
+  };
+
+  const reorderBooks = async (next: BookSummary[]) => {
+    setLibrary(next);
+    await saveLibrary(next);
   };
 
   const exportBackup = async () => {
@@ -183,7 +183,7 @@ export default function App() {
     <SafeAreaProvider>
       <View style={styles.app}>
         {screen === 'library' ? (
-          <LibraryScreen library={library} palette={getReaderPalette(prefs.theme)} importing={importing} openingBookId={openingBookId} onImport={importBook} onOpen={openBook} onRemove={removeBook} onSettings={() => setSettingsOpen(true)} onData={() => setDataOpen(true)} />
+          <LibraryScreen library={library} palette={getReaderPalette(prefs.theme)} importing={importing} openingBookId={openingBookId} onImport={importBook} onOpen={openBook} onRemove={removeBook} onReorder={reorderBooks} onSettings={() => setSettingsOpen(true)} onData={() => setDataOpen(true)} />
         ) : book ? (
           <ReaderScreen
             book={book}

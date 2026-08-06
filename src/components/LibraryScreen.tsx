@@ -1,12 +1,12 @@
-import React from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StatusBar as NativeStatusBar, Text, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Animated, BackHandler, Pressable, ScrollView, StatusBar as NativeStatusBar, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BookSummary } from '../types';
-import { C, ReaderPalette } from '../ui/theme';
+import { ReaderPalette } from '../ui/theme';
 import { styles } from '../ui/styles';
+import { SortableBookGrid } from './SortableBookGrid';
 
 export function Splash() {
   return (
@@ -26,12 +26,58 @@ type LibraryScreenProps = {
   openingBookId: string | null;
   onImport: () => void;
   onOpen: (book: BookSummary) => void;
-  onRemove: (book: BookSummary) => void;
+  onRemove: (book: BookSummary) => Promise<void>;
+  onReorder: (books: BookSummary[]) => Promise<void>;
   onSettings: () => void;
   onData: () => void;
 };
 
+type Notice = { text: string; error: boolean };
+type RemoveRequest = { book: BookSummary; confirm: () => void };
+
 export function LibraryScreen(props: LibraryScreenProps) {
+  const insets = useSafeAreaInsets();
+  const [dragging, setDragging] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [removeRequest, setRemoveRequest] = useState<RemoveRequest | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+  }, []);
+
+  const showNotice = useCallback((text: string, error = false) => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice({ text, error });
+    noticeTimer.current = setTimeout(() => setNotice(null), 1900);
+  }, []);
+
+  const cancelRemove = useCallback(() => {
+    setRemoveRequest(null);
+  }, []);
+
+  const requestRemove = useCallback((book: BookSummary, confirm: () => void) => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice(null);
+    setRemoveRequest({ book, confirm });
+  }, []);
+
+  const confirmRemove = useCallback(() => {
+    const pending = removeRequest;
+    if (!pending) return;
+    setRemoveRequest(null);
+    pending.confirm();
+  }, [removeRequest]);
+
+  useEffect(() => {
+    if (!removeRequest) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      cancelRemove();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [cancelRemove, removeRequest]);
+
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.library, { backgroundColor: props.palette.bg }]}>
       <NativeStatusBar backgroundColor={props.palette.bg} barStyle={props.palette.bg === '#142428' ? 'light-content' : 'dark-content'} />
@@ -41,6 +87,11 @@ export function LibraryScreen(props: LibraryScreenProps) {
           <Text style={[styles.libraryTitle, { color: props.palette.text }]}>墨问</Text>
         </View>
         <View style={styles.libraryHeaderActions}>
+          {removeRequest && (
+            <Pressable accessibilityRole="button" accessibilityLabel="确认删除" onPress={confirmRemove} style={({ pressed }) => [styles.libraryRemoveAction, { borderColor: props.palette.danger, backgroundColor: props.palette.bg }, pressed && styles.pressed]}>
+              <Ionicons name="trash-outline" size={19} color={props.palette.danger} />
+            </Pressable>
+          )}
           <Pressable accessibilityLabel="数据管理" onPress={props.onData} style={({ pressed }) => [styles.iconButtonDark, { borderColor: props.palette.line, backgroundColor: props.palette.surfaceAlt }, pressed && styles.pressed]}>
             <Ionicons name="archive-outline" size={21} color={props.palette.text} />
           </Pressable>
@@ -50,49 +101,28 @@ export function LibraryScreen(props: LibraryScreenProps) {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.libraryScroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.sectionHead}>
-          <Text style={[styles.sectionTitle, { color: props.palette.text }]}>书架</Text>
-          <Text style={[styles.sectionCount, { color: props.palette.muted }]}>{props.library.length} 本</Text>
-        </View>
-        <View style={styles.bookGrid}>
-          {props.library.map((item, index) => (
-            <BookTile palette={props.palette} key={item.id} item={item} index={index} loading={props.openingBookId === item.id} disabled={!!props.openingBookId} onOpen={() => props.onOpen(item)} onRemove={() => props.onRemove(item)} />
-          ))}
-          <View style={styles.addTileWrap}>
-            <Pressable onPress={props.onImport} style={({ pressed }) => [styles.addTile, { borderColor: props.palette.line, backgroundColor: props.palette.surface }, pressed && styles.cardPressed]}>
-              {props.importing ? <ActivityIndicator color={props.palette.accent} /> : <Ionicons name="add" size={30} color={props.palette.accent} />}
-              <Text style={[styles.addText, { color: props.palette.accent }]}>{props.importing ? '正在导入…' : '导入 EPUB'}</Text>
-              <Text style={[styles.addHint, { color: props.palette.muted }]}>文件仅保存在本机</Text>
-            </Pressable>
-          </View>
-        </View>
+      <ScrollView scrollEnabled={!dragging} contentContainerStyle={styles.libraryScroll} showsVerticalScrollIndicator={false}>
+        <SortableBookGrid books={props.library} palette={props.palette} importing={props.importing} openingBookId={props.openingBookId} onImport={props.onImport} onOpen={props.onOpen} onRemove={props.onRemove} onRemoveRequest={requestRemove} onCancelRemove={cancelRemove} pendingRemovalId={removeRequest?.book.id ?? null} removalPending={!!removeRequest} onReorder={props.onReorder} onNotice={showNotice} onDraggingChange={setDragging} />
+        {removeRequest && <Pressable accessibilityRole="button" accessibilityLabel="取消删除" onPress={cancelRemove} style={styles.libraryDismissSpacer} />}
       </ScrollView>
+
+      {notice && <LibraryNotice notice={notice} palette={props.palette} bottomInset={insets.bottom} />}
     </SafeAreaView>
   );
 }
 
-function BookTile({ palette, item, index, loading, disabled, onOpen, onRemove }: { palette: ReaderPalette; item: BookSummary; index: number; loading: boolean; disabled: boolean; onOpen: () => void; onRemove: () => void }) {
-  const covers = [
-    ['#8DA9A6', '#355B61'], ['#A5A797', '#4E554F'], ['#B58D73', '#654B42'], ['#78919E', '#354D59'],
-  ];
-  const colors = covers[index % covers.length] as [string, string];
+function LibraryNotice({ notice, palette, bottomInset }: { notice: Notice; palette: ReaderPalette; bottomInset: number }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    opacity.setValue(0);
+    Animated.timing(opacity, { toValue: 1, duration: 160, useNativeDriver: true }).start();
+  }, [notice, opacity]);
   return (
-    <View style={styles.bookTileWrap}>
-      <Pressable disabled={disabled} onPress={onOpen} onLongPress={onRemove} style={({ pressed }) => [styles.bookTile, pressed && styles.cardPressed]}>
-        {item.cover ? <Image source={{ uri: item.cover }} style={styles.coverImage} /> : (
-          <LinearGradient colors={colors} style={styles.coverFallback}>
-            <View style={styles.coverLine} />
-            <Text numberOfLines={4} style={styles.coverTitle}>{item.title}</Text>
-            <Text numberOfLines={1} style={styles.coverAuthor}>{item.author}</Text>
-            <Text style={styles.coverSeal}>墨问</Text>
-          </LinearGradient>
-        )}
-        {loading && <View style={styles.bookOpening}><ActivityIndicator color={C.white} /></View>}
-        {item.progress > 0 && <View style={styles.bookProgress}><View style={[styles.bookProgressFill, { width: `${item.progress * 100}%` }]} /></View>}
-      </Pressable>
-      <Text numberOfLines={1} style={[styles.tileTitle, { color: palette.text }]}>{item.title}</Text>
-      <Text numberOfLines={1} style={[styles.tileAuthor, { color: palette.muted }]}>{item.author}</Text>
-    </View>
+    <Animated.View style={[styles.libraryNotice, { bottom: Math.max(16, bottomInset + 12), backgroundColor: palette.bg, borderTopColor: palette.line, opacity }]}>
+      <View style={[styles.libraryNoticeIcon, { backgroundColor: palette.focus }]}>
+        <Ionicons name={notice.error ? 'alert-circle-outline' : 'checkmark'} size={16} color={palette.accent} />
+      </View>
+      <Text numberOfLines={1} style={[styles.libraryNoticeText, { color: palette.text }]}>{notice.text}</Text>
+    </Animated.View>
   );
 }
