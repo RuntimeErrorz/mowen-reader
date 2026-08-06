@@ -3,7 +3,7 @@ import { File } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 import JSZip from 'jszip';
-import { parseEpub } from './epub';
+import { normalizeChapterTitle, parseEpub } from './epub';
 import { AIConversation, AISettings, Book, Bookmark, BookSummary, ReaderPrefs } from './types';
 
 const LIBRARY_KEY = 'mowen:library:v1';
@@ -196,7 +196,7 @@ export async function saveBook(book: Book): Promise<Book> {
       const dimensions = imageDimensions(parsed[2]);
       paragraphs.push(`[[MOWEN_IMAGE_FILE:${path}${dimensions ? `|${dimensions.width}|${dimensions.height}` : ''}]]`);
     }
-    const normalizedChapter = { ...chapter, paragraphs };
+    const normalizedChapter = { ...chapter, title: normalizeChapterTitle(chapter.title), paragraphs };
     await FileSystem.writeAsStringAsync(`${chaptersDir}${chapterIndex}.json`, JSON.stringify(normalizedChapter));
     return normalizedChapter;
   });
@@ -232,9 +232,11 @@ export async function loadBook(id: string): Promise<Book | null> {
   const metadataInfo = await FileSystem.getInfoAsync(metadataPath);
   if (metadataInfo.exists) {
     const metadata = JSON.parse(await FileSystem.readAsStringAsync(metadataPath)) as StoredBookMetadata;
-    const chapters = await Promise.all(metadata.chapterFiles.map(async (relativePath) => JSON.parse(await FileSystem.readAsStringAsync(`${root}${relativePath}`))));
+    const chapters = await Promise.all(metadata.chapterFiles.map(async (relativePath) => JSON.parse(await FileSystem.readAsStringAsync(`${root}${relativePath}`)) as Book['chapters'][number]));
+    const normalizedChapters = chapters.map((chapter) => ({ ...chapter, title: normalizeChapterTitle(chapter.title) }));
+    const titlesChanged = normalizedChapters.some((chapter, index) => chapter.title !== chapters[index].title);
     const { formatVersion: _formatVersion, chapterFiles: _chapterFiles, ...bookMetadata } = metadata;
-    const book: Book = { ...bookMetadata, chapters };
+    const book: Book = { ...bookMetadata, chapters: normalizedChapters };
     const formatVersion = Number.isFinite(metadata.formatVersion) ? metadata.formatVersion : 0;
     if (formatVersion < BOOK_FORMAT_VERSION && book.epubUri) {
       try {
@@ -252,6 +254,9 @@ export async function loadBook(id: string): Promise<Book | null> {
       }
     }
     if (formatVersion < BOOK_FORMAT_VERSION) return saveBook(book);
+    if (titlesChanged) {
+      await Promise.all(normalizedChapters.map((chapter, index) => chapter.title === chapters[index].title ? undefined : FileSystem.writeAsStringAsync(`${root}${metadata.chapterFiles[index]}`, JSON.stringify(chapter))));
+    }
     rememberBook(book);
     return book;
   }
@@ -318,25 +323,25 @@ export async function saveAISettings(value: AISettings) {
 
 export async function loadBookmarks(): Promise<Bookmark[]> {
   const value = await AsyncStorage.getItem(BOOKMARKS_KEY);
-  return value ? JSON.parse(value) : [];
+  return value ? (JSON.parse(value) as Bookmark[]).map((bookmark) => ({ ...bookmark, chapterTitle: normalizeChapterTitle(bookmark.chapterTitle) })) : [];
 }
 
 export async function saveBookmarks(value: Bookmark[]) {
-  await AsyncStorage.setItem(BOOKMARKS_KEY, JSON.stringify(value));
+  await AsyncStorage.setItem(BOOKMARKS_KEY, JSON.stringify(value.map((bookmark) => ({ ...bookmark, chapterTitle: normalizeChapterTitle(bookmark.chapterTitle) }))));
 }
 
 export async function loadConversations(): Promise<AIConversation[]> {
   const info = await FileSystem.getInfoAsync(CONVERSATIONS_FILE);
   if (!info.exists) return [];
   try {
-    return JSON.parse(await FileSystem.readAsStringAsync(CONVERSATIONS_FILE));
+    return (JSON.parse(await FileSystem.readAsStringAsync(CONVERSATIONS_FILE)) as AIConversation[]).map((conversation) => ({ ...conversation, chapterTitle: normalizeChapterTitle(conversation.chapterTitle) }));
   } catch {
     return [];
   }
 }
 
 export async function saveConversations(value: AIConversation[]) {
-  await FileSystem.writeAsStringAsync(CONVERSATIONS_FILE, JSON.stringify(value));
+  await FileSystem.writeAsStringAsync(CONVERSATIONS_FILE, JSON.stringify(value.map((conversation) => ({ ...conversation, chapterTitle: normalizeChapterTitle(conversation.chapterTitle) }))));
 }
 
 export function summarizeBook(book: Book): BookSummary {

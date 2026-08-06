@@ -2,17 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, TextInput, View, StyleSheet } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import Markdown from 'react-native-markdown-display';
 import Slider from '@react-native-community/slider';
-import { askAI, AIIntent, buildAIRequestText } from '../../ai';
+import { askAI, buildAIRequestText } from '../../ai';
 import { labelNoteReferences, noteReferenceItemsIn, type NoteReference } from '../../aiContext';
+import { normalizeChapterTitle } from '../../epub';
 import { AIConversation, AIMessage, AISettings, Book, EpubLocator } from '../../types';
 import { C, ReaderPalette } from '../../ui/theme';
-import { markdownStyles, styles } from '../../ui/styles';
+import { styles } from '../../ui/styles';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
 import { AIContextCard } from './AIContextCard';
-import { formatMessageTime, getImageData, themedMarkdownStyles } from './readerUtils';
+import { formatMessageTime, getImageData, normalizeAIThinking, splitAIAnswer } from './readerUtils';
 import { useKeyboardVisibility } from './useKeyboardVisibility';
+import { AIMessageMarkdown } from './AIMessageMarkdown';
+import { AIThinkingTrace } from './AIThinkingTrace';
+import { AIThinkingToggle } from './AIThinkingToggle';
+import { useAutoScrollToLatest } from './useAutoScrollToLatest';
 
 type AIPanelProps = {
   visible: boolean;
@@ -43,24 +47,28 @@ export function AIPanel(props: AIPanelProps) {
   const [requestText, setRequestText] = useState('');
   const [conversationMessages, setConversationMessages] = useState<AIMessage[]>([]);
   const [answerTimestamp, setAnswerTimestamp] = useState<number | null>(null);
-  const questionInputRef = useRef<TextInput>(null);
+  const [answerThinking, setAnswerThinking] = useState('');
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const messagesRef = useRef<AIMessage[]>([]);
   const sessionId = useRef('');
   const sessionCreatedAt = useRef(0);
+  const { scrollRef, beginFollowing, resetFollowing, handleScroll, handleContentSizeChange } = useAutoScrollToLatest();
   const keyboardVisible = useKeyboardVisibility(props.visible);
   useEffect(() => {
     if (props.visible) {
-      setAnswer(''); setQuestion(''); setError(''); setLoading(false); setRequestText(''); setConversationMessages([]); setAnswerTimestamp(null);
+      resetFollowing();
+      setAnswer(''); setAnswerThinking(''); setQuestion(''); setError(''); setLoading(false); setRequestText(''); setConversationMessages([]); setAnswerTimestamp(null);
       messagesRef.current = [];
       sessionCreatedAt.current = Date.now();
       sessionId.current = `conversation-${sessionCreatedAt.current}-${Math.random().toString(36).slice(2, 6)}`;
     }
     return () => controller.current?.abort();
   }, [props.visible, props.paragraphIndex]);
-  const run = async (intent: AIIntent) => {
+  const run = async () => {
     if (!props.settings.apiKey.trim()) { setError('先配置模型接口，墨问才知道该去哪里思考。'); return; }
     const text = question.trim();
+    Keyboard.dismiss();
     const currentRequestText = buildAIRequestText({
       bookTitle: props.bookTitle,
       bookAuthor: props.bookAuthor,
@@ -69,7 +77,6 @@ export function AIPanel(props: AIPanelProps) {
       paragraphIndex: props.paragraphIndex,
       selectedText: props.selectedText,
       selectedImage: props.selectedImage,
-      intent,
       question: text || undefined,
       contextRadius,
       imageCount: contextImageUris.length,
@@ -77,34 +84,33 @@ export function AIPanel(props: AIPanelProps) {
     setRequestText(currentRequestText);
     const userCreatedAt = Date.now();
     setQuestion('');
-    setLoading(true); setError(''); setAnswer(''); setAnswerTimestamp(Date.now());
+    setLoading(true); setError(''); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(Date.now());
+    beginFollowing();
     controller.current?.abort();
     controller.current = new AbortController();
     try {
       const priorMessages = messagesRef.current;
       const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text, createdAt: userCreatedAt }];
       setConversationMessages(pendingMessages);
-      const result = await askAI({
+      const response = await askAI({
         ...props,
-        intent,
         question: text,
         contextRadius,
         selectedImage: props.selectedImage,
         additionalImages: props.selectedImage ? [props.selectedImage] : undefined,
         history: priorMessages,
+        enableThinking: thinkingEnabled,
         signal: controller.current.signal,
         onDelta: (delta) => setAnswer((current) => current + delta),
+        onThinkingDelta: thinkingEnabled ? (delta) => setAnswerThinking((current) => current + delta) : undefined,
       });
-      const userLabel: Record<AIIntent, string> = {
-        explain: '解释这段',
-        thread: '联系上下文',
-        simple: '说简单点',
-        question: text,
-      };
-      const nextMessages: AIMessage[] = [...pendingMessages.slice(0, -1), { role: 'user', content: userLabel[intent], createdAt: userCreatedAt }, { role: 'assistant', content: result, createdAt: Date.now() }];
+      const parsed = splitAIAnswer(response.content);
+      const result = parsed.content;
+      const thinking = thinkingEnabled ? normalizeAIThinking([response.thinking, parsed.thinking].filter(Boolean).join('\n\n')) : undefined;
+      const nextMessages: AIMessage[] = [...pendingMessages.slice(0, -1), { role: 'user', content: text, createdAt: userCreatedAt }, { role: 'assistant', content: result, thinking, createdAt: Date.now() }];
       messagesRef.current = nextMessages;
       setConversationMessages(nextMessages);
-      setAnswer(''); setAnswerTimestamp(null);
+      setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null);
       const selectedText = props.selectedText?.trim() || undefined;
       const rawExcerpt = props.selectedImage ? '〔插图〕' : props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
       props.onSaveConversation({
@@ -112,7 +118,7 @@ export function AIPanel(props: AIPanelProps) {
         bookId: props.bookId,
         chapterIndex: props.chapterIndex,
         paragraphIndex: props.paragraphIndex,
-        chapterTitle: props.chapter.title,
+        chapterTitle: normalizeChapterTitle(props.chapter.title),
         anchorExcerpt: getImageData(rawExcerpt) ? '〔插图〕' : labelNoteReferences(rawExcerpt).slice(0, 180),
         selectedText,
         selectedImage: props.selectedImage || undefined,
@@ -127,12 +133,6 @@ export function AIPanel(props: AIPanelProps) {
       setAnswerTimestamp(null);
       if ((e as Error).name !== 'AbortError') setError(e instanceof Error ? e.message : '暂时无法连接模型');
     } finally { setLoading(false); }
-  };
-  const fillPreset = (prompt: string) => {
-    setQuestion(prompt);
-    setAnswer('');
-    setError('');
-    requestAnimationFrame(() => questionInputRef.current?.focus());
   };
   const openImagePreview = (uri: string) => setPreviewImage(uri);
   const excerpt = labelNoteReferences(props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '');
@@ -178,13 +178,9 @@ export function AIPanel(props: AIPanelProps) {
           palette={props.palette}
           fillBelow
           showScrim={false}
-          style={[styles.aiSheet, hasStartedConversation && styles.aiSheetExpanded]}
+          style={[styles.aiSheet, !hasStartedConversation && !keyboardVisible && styles.aiSheetInitial, hasStartedConversation && styles.aiSheetExpanded]}
         >
-          <View style={styles.aiHeader}>
-            <View style={styles.aiTitleRow}><View style={[styles.miniSpark, { backgroundColor: props.palette.accent }]}><Ionicons name="sparkles" size={15} color={props.palette.onAccent} /></View><Text style={[styles.aiTitle, { color: props.palette.text }]}>理解此处</Text></View>
-            <Pressable onPress={close} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
-          </View>
-          <ScrollView style={styles.aiScroll} contentContainerStyle={styles.aiScrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <ScrollView ref={scrollRef} onScroll={handleScroll} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} style={styles.aiScroll} contentContainerStyle={styles.aiScrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <AIContextCard
               palette={props.palette}
               label="正在阅读"
@@ -201,7 +197,6 @@ export function AIPanel(props: AIPanelProps) {
                 paragraphIndex: props.paragraphIndex,
                 selectedText: props.selectedText,
                 selectedImage: props.selectedImage,
-                intent: 'question',
                 question: question.trim() || undefined,
                 contextRadius,
                 imageCount: contextImageUris.length,
@@ -229,13 +224,6 @@ export function AIPanel(props: AIPanelProps) {
                  <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>远 · 最多前后 20 个内容块</Text>
                </View>
             </>}
-            {showConversationSetup && (
-               <View style={styles.intentGrid}>
-                 <IntentButton palette={props.palette} title="解释这段" onPress={() => fillPreset('请解释这段内容的核心意思、关键概念和隐含逻辑。')} />
-                 <IntentButton palette={props.palette} title="联系上下文" onPress={() => fillPreset('请结合前后文，说明这段内容在本章论证中的作用。')} />
-                 <IntentButton palette={props.palette} title="说简单点" onPress={() => fillPreset('请用更直白的中文改写这段内容，并举一个贴切的小例子。')} />
-                </View>
-             )}
             {conversationMessages.map((message, index) => message.role === 'user' ? (
               <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, index === 0 && styles.historyFirstQuestionBlock, { backgroundColor: props.palette.focus }]}>
                 <Text style={[styles.historyQuestionText, { color: props.palette.text }]}>{message.content}</Text>
@@ -243,23 +231,28 @@ export function AIPanel(props: AIPanelProps) {
               </View>
             ) : (
               <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
+                <AIThinkingTrace palette={props.palette} thinking={message.thinking} defaultExpanded={thinkingEnabled && index === conversationMessages.length - 1} />
+                <AIMessageMarkdown palette={props.palette} content={message.content} />
                 <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, sessionCreatedAt.current)}</Text>
               </View>
             ))}
             {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-              <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
+              <AIThinkingTrace palette={props.palette} active={loading && thinkingEnabled} thinking={[answerThinking, splitAIAnswer(answer).thinking].filter(Boolean).join('\n\n')} defaultExpanded={thinkingEnabled} />
+              <AIMessageMarkdown palette={props.palette} content={answer} />
               <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(answerTimestamp ?? undefined, sessionCreatedAt.current)}</Text>
             </View>}
-            {loading && <View style={styles.thinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingTitle, { color: props.palette.text }]}>正在生成回复…</Text></View>}
+            {loading && thinkingEnabled && !answer && <AIThinkingTrace palette={props.palette} active thinking={answerThinking} defaultExpanded />}
+            {loading && !thinkingEnabled && <View style={styles.thinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingTitle, { color: props.palette.text }]}>正在生成回复…</Text></View>}
             {!!error && <View style={[styles.errorCard, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="information-circle-outline" size={19} color={C.ember} /><Text style={[styles.errorText, { color: props.palette.text }]}>{error}</Text>{!props.settings.apiKey && <Pressable onPress={props.onSettings}><Text style={[styles.errorLink, { color: props.palette.accent }]}>去配置</Text></Pressable>}</View>}
           </ScrollView>
-          <View style={[styles.aiComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
+          <View style={[styles.aiComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line, paddingBottom: keyboardVisible ? 5 : 16 }]}>
             <View style={[styles.questionBox, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-              <TextInput ref={questionInputRef} value={question} onChangeText={setQuestion} placeholder="也可以直接问一个问题…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
-              <Pressable disabled={!question.trim() || loading} onPress={() => run('question')} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
+              <TextInput value={question} onChangeText={setQuestion} multiline style={[styles.questionInput, { color: props.palette.text }]} />
+              <View style={styles.questionBoxFooter}>
+                <AIThinkingToggle palette={props.palette} value={thinkingEnabled} onChange={setThinkingEnabled} disabled={loading} />
+                <Pressable hitSlop={5} disabled={!question.trim() || loading} onPress={run} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
+              </View>
             </View>
-            <Text style={[styles.privacyNote, { color: props.palette.muted }]}>发送范围：书籍信息、所选上下文及范围内插图</Text>
           </View>
         </DraggableSheet>
         {!!previewImage && <View style={[StyleSheet.absoluteFill, styles.imagePreviewRoot, { backgroundColor: props.palette.scrim }]}>
@@ -276,8 +269,4 @@ export function AIPanel(props: AIPanelProps) {
       </View>
     </Modal>
   );
-}
-
-function IntentButton({ palette, title, onPress }: { palette: ReaderPalette; title: string; onPress: () => void }) {
-  return <Pressable onPress={onPress} style={({ pressed }) => [styles.intentButton, { backgroundColor: palette.control, borderColor: palette.line }, pressed && styles.pressed]}><Text style={[styles.intentTitle, { color: palette.text }]}>{title}</Text></Pressable>;
 }

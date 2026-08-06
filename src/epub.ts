@@ -30,6 +30,10 @@ function textValue(value: any): string {
   return '';
 }
 
+export function normalizeChapterTitle(value?: string): string {
+  return decode(String(value ?? '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
 function extractFootnotes(html: string) {
   const notes: Record<string, string> = {};
   const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
@@ -65,7 +69,7 @@ function stripHtml(
   const noteListRegex = /<ol\b[^>]*class=["'][^"']*footnote-content[^"']*["'][^>]*>[\s\S]*?<\/ol>/gi;
   const standaloneNoteRegex = /<(?:p|li|aside)\b[^>]*(?:class=["'][^"']*(?:fncontent|footnote)[^"']*["']|epub:type=["'](?:footnote|endnote)["'])[^>]*>[\s\S]*?<\/(?:p|li|aside)>/gi;
   const heading = html.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1];
-  const title = heading ? decode(heading.replace(/<[^>]+>/g, '').trim()) : '';
+  const title = heading ? normalizeChapterTitle(heading) : '';
   let body = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -102,7 +106,7 @@ function navLabels(html: string, base: string) {
   const regex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(html))) {
-    labels.set(resolvePath(base, match[1]), decode(match[2].replace(/<[^>]+>/g, '').trim()));
+    labels.set(resolvePath(base, match[1]), normalizeChapterTitle(match[2]));
   }
   return labels;
 }

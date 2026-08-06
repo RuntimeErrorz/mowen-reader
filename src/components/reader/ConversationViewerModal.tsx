@@ -2,16 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import Markdown from 'react-native-markdown-display';
 import { askAI, buildAIRequestText } from '../../ai';
 import { labelNoteReferences, noteReferenceItemsIn, type NoteReference } from '../../aiContext';
+import { normalizeChapterTitle } from '../../epub';
 import { AIConversation, AIMessage, AISettings, Book } from '../../types';
 import { ReaderPalette } from '../../ui/theme';
-import { markdownStyles, styles } from '../../ui/styles';
+import { styles } from '../../ui/styles';
 import { AIContextCard } from './AIContextCard';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
-import { formatMessageTime, getImageData, themedMarkdownStyles } from './readerUtils';
+import { formatMessageTime, getImageData, normalizeAIThinking, splitAIAnswer } from './readerUtils';
 import { useKeyboardVisibility } from './useKeyboardVisibility';
+import { AIMessageMarkdown } from './AIMessageMarkdown';
+import { AIThinkingTrace } from './AIThinkingTrace';
+import { AIThinkingToggle } from './AIThinkingToggle';
+import { useAutoScrollToLatest } from './useAutoScrollToLatest';
 
 export function ConversationViewerModal(props: {
   conversation: AIConversation | null;
@@ -30,14 +34,17 @@ export function ConversationViewerModal(props: {
   const [error, setError] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [requestText, setRequestText] = useState('');
+  const [answerThinking, setAnswerThinking] = useState('');
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const controller = useRef<AbortController | null>(null);
-  const scrollRef = useRef<ScrollView>(null);
+  const { scrollRef, beginFollowing, handleScroll, handleContentSizeChange, scrollToLatest } = useAutoScrollToLatest();
   const keyboardVisible = useKeyboardVisibility(!!props.conversation);
 
   useEffect(() => {
     if (!props.conversation) return;
     setMessages(props.conversation.messages);
-    setQuestion(''); setAnswer(''); setAnswerTimestamp(null); setError(''); setLoading(false); setRequestText(''); setPreviewImage(null);
+    setQuestion(''); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null); setError(''); setLoading(false); setRequestText(''); setPreviewImage(null);
+    beginFollowing();
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
     return () => controller.current?.abort();
   }, [props.conversation?.id]);
@@ -83,7 +90,6 @@ export function ConversationViewerModal(props: {
       paragraphIndex,
       selectedText: conversation.selectedText,
       selectedImage: conversation.selectedImage,
-      intent: 'question',
       question: firstQuestion || undefined,
       contextRadius: radius,
       imageCount: contextImageUris.length,
@@ -99,6 +105,7 @@ export function ConversationViewerModal(props: {
     if (!props.settings.apiKey.trim()) { setError('模型密钥不可用，请先在设置中配置。'); return; }
     const priorMessages = messages;
     const userCreatedAt = Date.now();
+    Keyboard.dismiss();
     setRequestText(buildAIRequestText({
       bookTitle: props.book.title,
       bookAuthor: props.book.author,
@@ -107,18 +114,18 @@ export function ConversationViewerModal(props: {
       paragraphIndex,
       selectedText: conversation.selectedText,
       selectedImage: conversation.selectedImage,
-      intent: 'question',
       question: text,
       contextRadius: radius,
       imageCount: contextImageUris.length,
     }));
     const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text, createdAt: userCreatedAt }];
     setMessages(pendingMessages);
-    setQuestion(''); setAnswer(''); setAnswerTimestamp(Date.now()); setLoading(true); setError('');
+    setQuestion(''); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(Date.now()); setLoading(true); setError('');
+    beginFollowing();
     controller.current?.abort();
     controller.current = new AbortController();
     try {
-      const result = await askAI({
+      const response = await askAI({
         settings: props.settings,
         bookTitle: props.book.title,
         bookAuthor: props.book.author,
@@ -129,17 +136,21 @@ export function ConversationViewerModal(props: {
         selectedImage: conversation.selectedImage,
         additionalImages: conversation.selectedImage ? [conversation.selectedImage] : undefined,
         contextRadius: radius,
-        intent: 'question',
         question: text,
         history: priorMessages,
+        enableThinking: thinkingEnabled,
         signal: controller.current.signal,
         onDelta: (delta) => setAnswer((current) => current + delta),
+        onThinkingDelta: thinkingEnabled ? (delta) => setAnswerThinking((current) => current + delta) : undefined,
       });
-      const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: result, createdAt: Date.now() }];
-      setMessages(next); setAnswer(''); setAnswerTimestamp(null);
+      const parsed = splitAIAnswer(response.content);
+      const result = parsed.content;
+      const thinking = thinkingEnabled ? normalizeAIThinking([response.thinking, parsed.thinking].filter(Boolean).join('\n\n')) : undefined;
+      const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: result, thinking, createdAt: Date.now() }];
+      setMessages(next); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null);
       props.onUpdate({ ...conversation, messages: next, updatedAt: Date.now() });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+      setTimeout(() => scrollToLatest(true), 80);
     } catch (cause) {
       setAnswerTimestamp(null);
       if ((cause as Error).name === 'AbortError') return;
@@ -156,10 +167,10 @@ export function ConversationViewerModal(props: {
         <KeyboardAvoidingView pointerEvents="box-none" behavior={Platform.OS === 'ios' ? 'padding' : keyboardVisible ? 'height' : undefined} style={styles.modalRoot}>
           <DraggableSheet visible onClose={stay} palette={props.palette} fillBelow showScrim={false} style={[styles.aiSheet, styles.aiSheetExpanded]}>
             <View style={[styles.historyHeader, { borderBottomColor: props.palette.line }]}>
-              <View style={{ flex: 1 }}><Text numberOfLines={1} style={[styles.historyChapter, { color: props.palette.text }]}>{conversation.chapterTitle}</Text></View>
+              <Text numberOfLines={1} ellipsizeMode="clip" style={[styles.historyChapter, { color: props.palette.text }]}>{normalizeChapterTitle(conversation.chapterTitle)}</Text>
               <Pressable onPress={returnToAnchor} style={[styles.returnButton, { borderColor: props.palette.line }]}><Ionicons name="arrow-undo" size={16} color={props.palette.accent} /><Text style={[styles.returnButtonText, { color: props.palette.accent }]}>返回原处</Text></Pressable>
             </View>
-            <ScrollView ref={scrollRef} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <ScrollView ref={scrollRef} onScroll={handleScroll} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <AIContextCard
                 palette={props.palette}
                 label="当时的上下文"
@@ -176,7 +187,6 @@ export function ConversationViewerModal(props: {
                   paragraphIndex,
                   selectedText: conversation.selectedText,
                   selectedImage: conversation.selectedImage,
-                  intent: 'question',
                   question: conversation.messages.find((message) => message.role === 'user')?.content,
                   contextRadius: radius,
                   imageCount: contextImageUris.length,
@@ -190,20 +200,28 @@ export function ConversationViewerModal(props: {
                 </View>
               ) : (
                 <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                  <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{message.content}</Markdown>
+                  <AIThinkingTrace palette={props.palette} thinking={message.thinking} defaultExpanded={thinkingEnabled && index === messages.length - 1} />
+                  <AIMessageMarkdown palette={props.palette} content={message.content} />
                   <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
                 </View>
               ))}
               {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                <Markdown style={{ ...markdownStyles, ...themedMarkdownStyles(props.palette) }}>{answer}</Markdown>
+                <AIThinkingTrace palette={props.palette} active={loading && thinkingEnabled} thinking={[answerThinking, splitAIAnswer(answer).thinking].filter(Boolean).join('\n\n')} defaultExpanded={thinkingEnabled} />
+                <AIMessageMarkdown palette={props.palette} content={answer} />
                 <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(answerTimestamp ?? undefined, conversation.createdAt)}</Text>
               </View>}
-              {loading && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>正在生成回复…</Text></View>}
+              {loading && thinkingEnabled && !answer && <AIThinkingTrace palette={props.palette} active thinking={answerThinking} defaultExpanded />}
+              {loading && !thinkingEnabled && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>正在生成回复…</Text></View>}
               {!!error && <Text style={[styles.historyError, { color: props.palette.text, backgroundColor: props.palette.surfaceAlt }]}>{error}</Text>}
             </ScrollView>
-            <View style={[styles.historyComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line }]}>
-              <TextInput value={question} onChangeText={setQuestion} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.historyInput, { backgroundColor: props.palette.control, borderColor: props.palette.line, color: props.palette.text }]} />
-              <Pressable disabled={!question.trim() || loading} onPress={continueConversation} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
+            <View style={[styles.historyComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line, paddingBottom: keyboardVisible ? 7 : 16 }]}>
+              <View style={[styles.questionBox, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
+                <TextInput value={question} onChangeText={setQuestion} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
+                <View style={styles.questionBoxFooter}>
+                  <AIThinkingToggle palette={props.palette} value={thinkingEnabled} onChange={setThinkingEnabled} disabled={loading} />
+                  <Pressable hitSlop={5} disabled={!question.trim() || loading} onPress={continueConversation} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>
+                </View>
+              </View>
             </View>
           </DraggableSheet>
           {!!previewImage && <View style={[StyleSheet.absoluteFill, styles.imagePreviewRoot, { backgroundColor: props.palette.scrim }]}>

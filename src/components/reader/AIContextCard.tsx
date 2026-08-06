@@ -30,7 +30,7 @@ export function AIContextCard(props: AIContextCardProps) {
           <Text style={[styles.contextSummaryText, { color: props.palette.muted }]}>{props.notes.length} 条注释</Text>
         </View>
       </View>
-      <Text numberOfLines={3} style={[styles.contextText, { color: props.palette.text }]}>{props.excerptIsImage ? '当前是一幅插图，AI 将结合图片内容理解。' : props.excerpt}</Text>
+      <Text numberOfLines={5} style={[styles.contextText, { color: props.palette.text }]}>{props.excerptIsImage ? '当前是一幅插图，AI 将结合图片内容理解。' : props.excerpt}</Text>
       {!!props.imageUris.length && <ScrollView horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.contextImages}>
         {props.imageUris.map((uri, index) => <Pressable key={`${index}-${uri.slice(0, 32)}`} accessibilityLabel={`放大查看上下文图片 ${index + 1}`} onPress={() => props.onImagePress(uri)} style={({ pressed }) => [styles.contextImagePress, pressed && styles.pressed]}>
           <Image source={{ uri }} style={[styles.contextImage, { borderColor: props.palette.line }]} />

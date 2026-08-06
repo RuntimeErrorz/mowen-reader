@@ -3,6 +3,7 @@ import { Animated, FlatList, Modal, Platform, Pressable, ScrollView, Switch, Tex
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { FoliateTOCItem } from '../../FoliateReader';
+import { normalizeChapterTitle } from '../../epub';
 import { AIConversation, Bookmark, ReaderPrefs } from '../../types';
 import { getReaderPalette, ReaderPalette } from '../../ui/theme';
 import { styles } from '../../ui/styles';
@@ -142,7 +143,7 @@ export function BookmarksModal(props: {
             <Pressable onPress={() => props.onChoose(item)} style={({ pressed }) => [styles.bookmarkItem, { borderBottomColor: props.palette.line }, pressed && styles.pressed]}>
               <View style={styles.bookmarkRail}><View style={[styles.bookmarkDot, { backgroundColor: props.palette.accent }]} /><View style={[styles.bookmarkLine, { backgroundColor: props.palette.line }]} /></View>
               <View style={styles.bookmarkContent}>
-                <Text numberOfLines={1} style={[styles.bookmarkChapter, { color: props.palette.accent }]}>{item.chapterTitle}</Text>
+                <Text numberOfLines={1} style={[styles.bookmarkChapter, { color: props.palette.accent }]}>{normalizeChapterTitle(item.chapterTitle)}</Text>
                 <Text style={[styles.bookmarkLocation, { color: props.palette.muted }]}>第 {item.chapterIndex + 1} 章 · 位置 {item.paragraphIndex + 1}</Text>
                 <Text numberOfLines={3} style={[styles.bookmarkExcerpt, { color: props.palette.text }]}>{item.excerpt}</Text>
               </View>
@@ -162,7 +163,7 @@ export function BookmarksModal(props: {
               <Pressable onPress={() => props.onChooseConversation(item)} style={({ pressed }) => [styles.conversationItem, { borderBottomColor: props.palette.line }, pressed && styles.pressed]}>
                 <View style={[styles.conversationSpark, { backgroundColor: props.palette.accent }]}><Ionicons name="sparkles" size={14} color={props.palette.onAccent} /></View>
                 <View style={styles.bookmarkContent}>
-                  <Text numberOfLines={1} style={[styles.bookmarkChapter, { color: props.palette.accent }]}>{item.chapterTitle}</Text>
+                  <Text numberOfLines={1} style={[styles.bookmarkChapter, { color: props.palette.accent }]}>{normalizeChapterTitle(item.chapterTitle)}</Text>
                   <Text style={[styles.bookmarkLocation, { color: props.palette.muted }]}>第 {item.chapterIndex + 1} 章 · 位置 {item.paragraphIndex + 1} · {item.messages.length / 2} 轮</Text>
                   <Text numberOfLines={1} style={[styles.conversationQuestion, { color: props.palette.text }]}>{firstQuestion}</Text>
                   <Text numberOfLines={2} style={[styles.bookmarkExcerpt, { color: props.palette.text }]}>{lastAnswer.replace(/[#*_>`]/g, '')}</Text>

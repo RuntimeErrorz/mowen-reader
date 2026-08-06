@@ -70,6 +70,8 @@ export type AISettings = {
 export type AIMessage = {
   role: 'user' | 'assistant';
   content: string;
+  /** Optional provider-supplied thinking text kept separate from the final answer. */
+  thinking?: string;
   /** Optional for backwards compatibility with conversations saved before timestamps were added. */
   createdAt?: number;
 };

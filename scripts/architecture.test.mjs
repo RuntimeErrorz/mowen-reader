@@ -44,11 +44,21 @@ test('reader utility behavior is preserved after extraction', async () => {
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(compiled, { module, exports: module.exports }, { filename: 'readerUtils.ts' });
-  const { getImageData, themedMarkdownStyles } = module.exports;
+  const { getImageData, normalizeAIAnswer, normalizeAIThinking, splitAIAnswer, themedMarkdownStyles } = module.exports;
 
   assert.equal(getImageData('[[MOWEN_IMAGE_DATA:data:image/png;base64,abc]]'), 'data:image/png;base64,abc');
   assert.equal(getImageData('[[MOWEN_IMAGE_FILE:file:///tmp/image.png|120|80]]'), 'file:///tmp/image.png');
   assert.equal(getImageData('正文'), undefined);
+  assert.equal(normalizeAIAnswer('\\*\\*转义\\*\\* 和 ＊＊全角＊＊'), '**转义** 和 **全角**');
+  assert.equal(normalizeAIAnswer('** 前后有空格 **'), '**前后有空格**');
+  assert.equal(normalizeAIAnswer('**第一** 和 **第二**'), '**第一** 和 **第二**');
+  assert.equal(normalizeAIAnswer('<think>内部过程</think>**答案**'), '**答案**');
+  assert.equal(normalizeAIAnswer('```markdown\n**标题**\n```'), '**标题**');
+  assert.equal(normalizeAIAnswer('`**代码**` **正文**'), '`**代码**` **正文**');
+  assert.equal(normalizeAIThinking('先看上下文\n\n再组织答案'), '先看上下文\n\n再组织答案');
+  const split = splitAIAnswer('<think>先看上下文</think>**答案**');
+  assert.equal(split.content, '**答案**');
+  assert.equal(split.thinking, '先看上下文');
 
   const palette = { text: '#111', accent: '#222', surfaceAlt: '#333', line: '#444' };
   assert.deepEqual(JSON.parse(JSON.stringify(themedMarkdownStyles(palette))), {
@@ -58,13 +68,28 @@ test('reader utility behavior is preserved after extraction', async () => {
     heading1: { color: '#111' },
     heading2: { color: '#111' },
     heading3: { color: '#111' },
-    strong: { color: '#111' },
+    strong: { color: '#111', fontWeight: '800' },
     link: { color: '#222' },
     blockquote: { backgroundColor: '#333', borderLeftColor: '#222' },
     code_inline: { color: '#111', backgroundColor: '#333' },
     bullet_list_icon: { color: '#222' },
     hr: { backgroundColor: '#444' },
   });
+});
+
+test('EPUB chapter titles collapse markup whitespace before display', async () => {
+  const source = await read('src/epub.ts');
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const module = { exports: {} };
+  const requires = {
+    jszip: {},
+    'fast-xml-parser': { XMLParser: class {} },
+    'html-entities': { decode: (value) => value },
+  };
+  vm.runInNewContext(compiled, { module, exports: module.exports, require: (id) => requires[id] }, { filename: 'epub.ts' });
+  const { normalizeChapterTitle } = module.exports;
+
+  assert.equal(normalizeChapterTitle('<span>第2章</span><br class="calibre7"/>\n    大众疯狂'), '第2章 大众疯狂');
 });
 
 test('keyboard-aware sheets clear Android avoidance after the keyboard hides', async () => {
@@ -86,6 +111,47 @@ test('keyboard-aware sheets clear Android avoidance after the keyboard hides', a
   assert.doesNotMatch(draggableSheet, /Keyboard\.addListener|avoidKeyboard|keyboardOffset/);
   assert.match(keyboardVisibility, /keyboardDidShow/);
   assert.match(keyboardVisibility, /keyboardDidHide/);
+});
+
+test('AI thinking stays separate from answers and image swipes stay page gestures', async () => {
+  const ai = await read('src/ai.ts');
+  const aiPanel = await read('src/components/reader/AIPanel.tsx');
+  const conversationViewer = await read('src/components/reader/ConversationViewerModal.tsx');
+  const thinkingToggle = await read('src/components/reader/AIThinkingToggle.tsx');
+  const thinkingTrace = await read('src/components/reader/AIThinkingTrace.tsx');
+  const autoScroll = await read('src/components/reader/useAutoScrollToLatest.ts');
+  const runtime = await read('src/foliate/runtimePart9.ts');
+  assert.match(ai, /enable_thinking: options\.enableThinking \?\? false/);
+  assert.match(ai, /reasoning_content/);
+  assert.match(ai, /onThinkingDelta/);
+  assert.match(aiPanel, /AIThinkingToggle/);
+  assert.match(aiPanel, /AIThinkingTrace/);
+  assert.match(aiPanel, /questionBoxFooter[\s\S]*AIThinkingToggle/);
+  assert.match(aiPanel, /aiSheetInitial/);
+  assert.match(await read('src/ui/styles.ts'), /aiSheetInitial: \{ maxHeight: '72%' \}/);
+  assert.match(aiPanel, /paddingBottom: keyboardVisible \? 5 : 16/);
+  assert.match(conversationViewer, /questionBoxFooter[\s\S]*AIThinkingToggle/);
+  assert.match(conversationViewer, /paddingBottom: keyboardVisible \? 7 : 16/);
+  assert.match(await read('src/components/reader/AIContextCard.tsx'), /numberOfLines=\{5\}/);
+  assert.match(conversationViewer, /numberOfLines=\{1\} ellipsizeMode="clip"/);
+  assert.doesNotMatch(conversationViewer, /adjustsFontSizeToFit|minimumFontScale/);
+  assert.doesNotMatch(thinkingTrace, /ActivityIndicator/);
+  assert.doesNotMatch(thinkingTrace, /thinkingTraceMark|thinkingTraceHint/);
+  assert.match(thinkingTrace, /chevron-down/);
+  assert.match(aiPanel, /defaultExpanded=\{thinkingEnabled\}/);
+  assert.match(aiPanel, /enableThinking: thinkingEnabled/);
+  assert.doesNotMatch(aiPanel, /IntentButton|fillPreset|intentGrid/);
+  assert.doesNotMatch(thinkingToggle, /qwen/i);
+  assert.match(autoScroll, /followLatestRef/);
+  assert.match(autoScroll, /scrollToEnd/);
+  assert.match(aiPanel, /onContentSizeChange=\{handleContentSizeChange\}/);
+  assert.match(conversationViewer, /onContentSizeChange=\{handleContentSizeChange\}/);
+  assert.match(thinkingTrace, /onContentSizeChange=\{handleContentSizeChange\}/);
+  assert.match(aiPanel, /const text = question\.trim\(\);[\s\S]*Keyboard\.dismiss\(\);/);
+  assert.match(conversationViewer, /const text = question\.trim\(\);[\s\S]*Keyboard\.dismiss\(\);/);
+  assert.doesNotMatch(runtime, /const image = finished\.image \|\| imageFromEvent\(event\)/);
+  assert.match(runtime, /if \(finished\.moved\) \{[\s\S]*suppressClickUntil/);
+  assert.doesNotMatch(runtime, /imageTap/);
 });
 
 test('AGENTS.md documents the canonical ownership boundaries', async () => {

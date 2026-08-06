@@ -139,13 +139,12 @@ export const FOLIATE_BRIDGE_PART_9 = String.raw`uch.clientY;
       if (!touch) return;
       const finished = touch;
       touch = null;
-      const image = finished.image || imageFromEvent(event) || imageFromTarget(finished.target);
+      // Only the initial touch target can be an image tap. Looking at the
+      // touchend target makes a swipe that crosses an image look like a tap.
+      const image = finished.image || imageFromTarget(finished.target);
       const noteImage = image && isNoteLink(image.closest?.('a[href]'));
-      const endedPoint = Array.from(event.changedTouches || []).find(point => point.identifier === finished.identifier)
-        || Array.from(event.changedTouches || [])[0];
-      const imageTap = !!image && (!endedPoint || Math.hypot(endedPoint.clientX - finished.x, endedPoint.clientY - finished.y) <= 14);
       const pageResult = state.config?.prefs.readingMode === 'paged'
-        ? imageTap ? (pager.cancel(), { moved: false, committed: false }) : pager.end()
+        ? pager.end()
         : { moved: false, committed: false };
       if (state.config?.prefs.readingMode === 'paged') event.stopImmediatePropagation();
       if (pageResult.moved) {
@@ -153,14 +152,19 @@ export const FOLIATE_BRIDGE_PART_9 = String.raw`uch.clientY;
         event.preventDefault();
         return;
       }
-      if (state.config?.prefs.readingMode === 'scroll' && finished.moved) {
-        state.scrollIntentUntil = performance.now() + 1600;
-        queueScrolledBoundaryCheck();
+      if (finished.moved) {
+        suppressClickUntil = Date.now() + 700;
+        if (state.config?.prefs.readingMode === 'scroll') {
+          state.scrollIntentUntil = performance.now() + 1600;
+          queueScrolledBoundaryCheck();
+        }
+        event.preventDefault();
+        return;
       }
       if (finished.longPressed) { event.preventDefault(); return; }
-      if ((finished.moved && !imageTap) || Date.now() - finished.started > 500 || (interactive(finished.target) && !image)) return;
+      if (Date.now() - finished.started > 500 || (interactive(finished.target) && !image)) return;
       if (doc.getSelection?.()?.toString?.().trim()) return;
-      if (noteImage && imageTap) return;
+      if (noteImage) return;
       if (image) {
         event.preventDefault();
         event.stopImmediatePropagation();
