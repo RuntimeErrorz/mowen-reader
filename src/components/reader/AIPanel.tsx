@@ -246,10 +246,10 @@ export function AIPanel(props: AIPanelProps) {
                  thumbTintColor={props.palette.accent}
                  style={styles.contextSlider}
                />
-               <View style={styles.contextSliderMeta}>
-                 <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>近</Text>
-                 <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>远 · 最多前后 20 个内容块</Text>
-               </View>
+              <View style={styles.contextSliderMeta}>
+                <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>近</Text>
+                <Text style={[styles.contextSliderHint, { color: props.palette.muted }]}>远 · 最多前后 20 个内容块</Text>
+              </View>
             </>}
             {conversationMessages.map((message, index) => message.role === 'user' ? (
               <View key={`${message.role}-${index}`} style={[styles.historyQuestionBlock, index === 0 && styles.historyFirstQuestionBlock, { backgroundColor: props.palette.focus }]}>

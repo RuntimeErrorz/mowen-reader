@@ -130,9 +130,17 @@ export default function App() {
 
   const removeBook = async (item: BookSummary) => {
     await deleteBookFile(item.id);
-    const next = library.filter((bookItem) => bookItem.id !== item.id);
-    setLibrary(next);
-    await saveLibrary(next);
+    const nextLibrary = library.filter((bookItem) => bookItem.id !== item.id);
+    const nextBookmarks = bookmarks.filter((bookmark) => bookmark.bookId !== item.id);
+    const nextConversations = conversations.filter((conversation) => conversation.bookId !== item.id);
+    await Promise.all([
+      saveLibrary(nextLibrary),
+      saveBookmarks(nextBookmarks),
+      saveConversations(nextConversations),
+    ]);
+    setLibrary(nextLibrary);
+    setBookmarks(nextBookmarks);
+    setConversations(nextConversations);
   };
 
   const reorderBooks = async (next: BookSummary[]) => {

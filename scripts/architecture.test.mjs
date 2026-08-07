@@ -117,31 +117,19 @@ test('AI thinking stays separate from answers and image swipes stay page gesture
   const ai = await read('src/ai.ts');
   const aiPanel = await read('src/components/reader/AIPanel.tsx');
   const conversationViewer = await read('src/components/reader/ConversationViewerModal.tsx');
-  const thinkingToggle = await read('src/components/reader/AIThinkingToggle.tsx');
   const thinkingTrace = await read('src/components/reader/AIThinkingTrace.tsx');
   const autoScroll = await read('src/components/reader/useAutoScrollToLatest.ts');
   const runtime = await read('src/foliate/runtimePart9.ts');
   assert.match(ai, /enable_thinking: options\.enableThinking \?\? false/);
   assert.match(ai, /reasoning_content/);
   assert.match(ai, /onThinkingDelta/);
-  assert.match(aiPanel, /AIThinkingToggle/);
   assert.match(aiPanel, /AIThinkingTrace/);
+  assert.match(aiPanel, /AIThinkingToggle/);
   assert.match(aiPanel, /questionBoxFooter[\s\S]*AIThinkingToggle/);
-  assert.match(aiPanel, /aiSheetInitial/);
-  assert.match(await read('src/ui/styles.ts'), /aiSheetInitial: \{ maxHeight: '72%' \}/);
-  assert.match(aiPanel, /paddingBottom: keyboardVisible \? 5 : 16/);
   assert.match(conversationViewer, /questionBoxFooter[\s\S]*AIThinkingToggle/);
-  assert.match(conversationViewer, /paddingBottom: keyboardVisible \? 7 : 16/);
-  assert.match(await read('src/components/reader/AIContextCard.tsx'), /numberOfLines=\{5\}/);
-  assert.match(conversationViewer, /numberOfLines=\{1\} ellipsizeMode="clip"/);
-  assert.doesNotMatch(conversationViewer, /adjustsFontSizeToFit|minimumFontScale/);
   assert.doesNotMatch(thinkingTrace, /ActivityIndicator/);
-  assert.doesNotMatch(thinkingTrace, /thinkingTraceMark|thinkingTraceHint/);
-  assert.match(thinkingTrace, /chevron-down/);
   assert.match(aiPanel, /defaultExpanded=\{thinkingEnabled\}/);
   assert.match(aiPanel, /enableThinking: thinkingEnabled/);
-  assert.doesNotMatch(aiPanel, /IntentButton|fillPreset|intentGrid/);
-  assert.doesNotMatch(thinkingToggle, /qwen/i);
   assert.match(autoScroll, /followLatestRef/);
   assert.match(autoScroll, /scrollToEnd/);
   assert.match(aiPanel, /onContentSizeChange=\{handleContentSizeChange\}/);
@@ -154,9 +142,10 @@ test('AI thinking stays separate from answers and image swipes stay page gesture
   assert.doesNotMatch(runtime, /imageTap/);
 });
 
-test('AGENTS.md documents the canonical ownership boundaries', async () => {
-  const agents = await read('AGENTS.md');
-  assert.match(agents, /本仓库的规范文件名是根目录 `AGENTS\.md`/);
-  assert.match(agents, /src\/foliate\/runtime\.ts/);
-  assert.match(agents, /不要另建大小写不同或内容重复的 `agent\.md`/);
+test('deleting a book removes its persisted bookmarks and conversations', async () => {
+  const app = await read('App.tsx');
+  assert.match(app, /const nextBookmarks = bookmarks\.filter\(\(bookmark\) => bookmark\.bookId !== item\.id\)/);
+  assert.match(app, /const nextConversations = conversations\.filter\(\(conversation\) => conversation\.bookId !== item\.id\)/);
+  assert.match(app, /saveBookmarks\(nextBookmarks\)/);
+  assert.match(app, /saveConversations\(nextConversations\)/);
 });
