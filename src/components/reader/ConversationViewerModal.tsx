@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { askAI, buildAIRequestText } from '../../ai';
@@ -29,7 +29,6 @@ export function ConversationViewerModal(props: {
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
-  const [answerTimestamp, setAnswerTimestamp] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -37,15 +36,14 @@ export function ConversationViewerModal(props: {
   const [answerThinking, setAnswerThinking] = useState('');
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const controller = useRef<AbortController | null>(null);
-  const { scrollRef, beginFollowing, handleScroll, handleContentSizeChange, scrollToLatest } = useAutoScrollToLatest();
+  const { scrollRef, beginFollowing, handleInputFocus, handleScroll, handleScrollBeginDrag, handleScrollEndDrag, handleMomentumScrollEnd, handleContentSizeChange, handleLayout } = useAutoScrollToLatest();
   const keyboardVisible = useKeyboardVisibility(!!props.conversation);
 
   useEffect(() => {
     if (!props.conversation) return;
     setMessages(props.conversation.messages);
-    setQuestion(''); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null); setError(''); setLoading(false); setRequestText(''); setPreviewImage(null);
+    setQuestion(''); setAnswer(''); setAnswerThinking(''); setError(''); setLoading(false); setRequestText(''); setPreviewImage(null);
     beginFollowing();
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
     return () => controller.current?.abort();
   }, [props.conversation?.id]);
 
@@ -120,7 +118,7 @@ export function ConversationViewerModal(props: {
     }));
     const pendingMessages: AIMessage[] = [...priorMessages, { role: 'user', content: text, createdAt: userCreatedAt }];
     setMessages(pendingMessages);
-    setQuestion(''); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(Date.now()); setLoading(true); setError('');
+    setQuestion(''); setAnswer(''); setAnswerThinking(''); setLoading(true); setError('');
     beginFollowing();
     controller.current?.abort();
     controller.current = new AbortController();
@@ -147,12 +145,10 @@ export function ConversationViewerModal(props: {
       const result = parsed.content;
       const thinking = thinkingEnabled ? normalizeAIThinking([response.thinking, parsed.thinking].filter(Boolean).join('\n\n')) : undefined;
       const next: AIMessage[] = [...pendingMessages, { role: 'assistant', content: result, thinking, createdAt: Date.now() }];
-      setMessages(next); setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null);
+      setMessages(next); setAnswer(''); setAnswerThinking('');
       props.onUpdate({ ...conversation, messages: next, updatedAt: Date.now() });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTimeout(() => scrollToLatest(true), 80);
     } catch (cause) {
-      setAnswerTimestamp(null);
       if ((cause as Error).name === 'AbortError') return;
       setError(cause instanceof Error ? cause.message : '继续对话失败');
     } finally { setLoading(false); }
@@ -170,7 +166,7 @@ export function ConversationViewerModal(props: {
               <Text numberOfLines={1} ellipsizeMode="clip" style={[styles.historyChapter, { color: props.palette.text }]}>{normalizeChapterTitle(conversation.chapterTitle)}</Text>
               <Pressable onPress={returnToAnchor} style={[styles.returnButton, { borderColor: props.palette.line }]}><Ionicons name="arrow-undo" size={16} color={props.palette.accent} /><Text style={[styles.returnButtonText, { color: props.palette.accent }]}>返回原处</Text></Pressable>
             </View>
-            <ScrollView ref={scrollRef} onScroll={handleScroll} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <ScrollView ref={scrollRef} onLayout={handleLayout} onScroll={handleScroll} onScrollBeginDrag={handleScrollBeginDrag} onScrollEndDrag={handleScrollEndDrag} onMomentumScrollEnd={handleMomentumScrollEnd} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} style={styles.historyScroll} contentContainerStyle={styles.historyMessages} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <AIContextCard
                 palette={props.palette}
                 label="当时的上下文"
@@ -199,24 +195,22 @@ export function ConversationViewerModal(props: {
                   <Text style={[styles.messageTime, styles.questionMessageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
                 </View>
               ) : (
-                <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
+                <View key={`${message.role}-${index}`} style={[styles.historyAnswerBlock, index === messages.length - 1 && styles.historyLastAnswerBlock]}>
                   <AIThinkingTrace palette={props.palette} thinking={message.thinking} defaultExpanded={thinkingEnabled && index === messages.length - 1} />
                   <AIMessageMarkdown palette={props.palette} content={message.content} />
-                  <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
+                  <Text style={[styles.messageTime, styles.answerMessageTime, { color: props.palette.muted }]}>{formatMessageTime(message.createdAt, conversation.createdAt)}</Text>
                 </View>
               ))}
-              {!!answer && <View style={[styles.historyAnswerBlock, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
+              {(!!answer || !!answerThinking) && <View style={styles.historyAnswerBlock}>
                 <AIThinkingTrace palette={props.palette} active={loading && thinkingEnabled} thinking={[answerThinking, splitAIAnswer(answer).thinking].filter(Boolean).join('\n\n')} defaultExpanded={thinkingEnabled} />
                 <AIMessageMarkdown palette={props.palette} content={answer} />
-                <Text style={[styles.messageTime, { color: props.palette.muted }]}>{formatMessageTime(answerTimestamp ?? undefined, conversation.createdAt)}</Text>
               </View>}
-              {loading && thinkingEnabled && !answer && <AIThinkingTrace palette={props.palette} active thinking={answerThinking} defaultExpanded />}
-              {loading && !thinkingEnabled && <View style={styles.historyThinking}><ActivityIndicator color={props.palette.accent} /><Text style={[styles.thinkingNote, { color: props.palette.muted }]}>正在生成回复…</Text></View>}
               {!!error && <Text style={[styles.historyError, { color: props.palette.text, backgroundColor: props.palette.surfaceAlt }]}>{error}</Text>}
+              <View style={styles.latestBottomSpacer} />
             </ScrollView>
             <View style={[styles.historyComposer, { backgroundColor: props.palette.surface, borderTopColor: props.palette.line, paddingBottom: keyboardVisible ? 7 : 16 }]}>
               <View style={[styles.questionBox, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-                <TextInput value={question} onChangeText={setQuestion} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
+                <TextInput value={question} onChangeText={setQuestion} onFocus={handleInputFocus} placeholder="继续追问这段对话…" placeholderTextColor={props.palette.muted} multiline style={[styles.questionInput, { color: props.palette.text }]} />
                 <View style={styles.questionBoxFooter}>
                   <AIThinkingToggle palette={props.palette} value={thinkingEnabled} onChange={setThinkingEnabled} disabled={loading} />
                   <Pressable hitSlop={5} disabled={!question.trim() || loading} onPress={continueConversation} style={[styles.sendButton, { backgroundColor: props.palette.accent }, (!question.trim() || loading) && { opacity: 0.45 }]}><Ionicons name="arrow-up" size={18} color={props.palette.onAccent} /></Pressable>

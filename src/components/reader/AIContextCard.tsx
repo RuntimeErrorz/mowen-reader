@@ -41,7 +41,7 @@ export function AIContextCard(props: AIContextCardProps) {
         <View style={styles.contextNotesHeader}><Ionicons name="bookmark-outline" size={14} color={props.palette.accent} /><Text style={[styles.contextNotesHeaderText, { color: props.palette.accent }]}>注释</Text><Text style={[styles.contextSummaryText, { color: props.palette.muted }]}>{props.notes.length} 条</Text></View>
         <ScrollView horizontal nestedScrollEnabled keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.contextNotesRail}>
           {props.notes.map((note, index) => <View key={`${note.id}-${index}`} style={[styles.contextNoteCard, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}>
-            <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" showsVerticalScrollIndicator persistentScrollbar style={styles.contextNoteScroll} contentContainerStyle={styles.contextNoteScrollContent}>
+            <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" showsVerticalScrollIndicator={false} style={styles.contextNoteScroll} contentContainerStyle={styles.contextNoteScrollContent}>
               <Text selectable style={[styles.contextNoteText, { color: props.palette.text }]}>{note.label ? <Text style={{ color: props.palette.accent, fontWeight: '800' }}>{note.label} </Text> : null}{note.text}</Text>
             </ScrollView>
           </View>)}

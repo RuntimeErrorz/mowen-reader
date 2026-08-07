@@ -190,7 +190,7 @@ export function TypeModal({ visible, value, onChange, onClose }: { visible: bool
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={previewPalette} style={styles.typeSheet}>
-        <View style={styles.sheetHeader}><Text style={[styles.sheetTitle, { color: previewPalette.text }]}>阅读外观</Text><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: previewPalette.surfaceAlt }]}><Ionicons name="close" size={20} color={previewPalette.text} /></Pressable></View>
+        <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: previewPalette.accent }]}>READING STYLE</Text><Text style={[styles.sheetTitle, { color: previewPalette.text }]}>阅读外观</Text></View><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: previewPalette.surfaceAlt }]}><Ionicons name="close" size={20} color={previewPalette.text} /></Pressable></View>
         <ScrollView contentContainerStyle={styles.typeScroll} showsVerticalScrollIndicator={false}>
         <View style={styles.layoutPairRow}>
           <View style={styles.layoutPairGroup}>
