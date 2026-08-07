@@ -3,7 +3,7 @@ import { ActivityIndicator, Image, Keyboard, KeyboardAvoidingView, Modal, Platfo
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
-import { askAI, buildAIRequestText } from '../../ai';
+import { askAI, buildAIRequestText, generateConversationTitle, normalizeConversationTitle } from '../../ai';
 import { labelNoteReferences, noteReferenceItemsIn, type NoteReference } from '../../aiContext';
 import { normalizeChapterTitle } from '../../epub';
 import { AIConversation, AIMessage, AISettings, Book, EpubLocator } from '../../types';
@@ -50,6 +50,7 @@ export function AIPanel(props: AIPanelProps) {
   const [answerThinking, setAnswerThinking] = useState('');
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const controller = useRef<AbortController | null>(null);
+  const titleController = useRef<AbortController | null>(null);
   const messagesRef = useRef<AIMessage[]>([]);
   const sessionId = useRef('');
   const sessionCreatedAt = useRef(0);
@@ -63,7 +64,10 @@ export function AIPanel(props: AIPanelProps) {
       sessionCreatedAt.current = Date.now();
       sessionId.current = `conversation-${sessionCreatedAt.current}-${Math.random().toString(36).slice(2, 6)}`;
     }
-    return () => controller.current?.abort();
+    return () => {
+      controller.current?.abort();
+      titleController.current?.abort();
+    };
   }, [props.visible, props.paragraphIndex]);
   const run = async () => {
     if (!props.settings.apiKey.trim()) { setError('先配置模型接口，墨问才知道该去哪里思考。'); return; }
@@ -113,12 +117,13 @@ export function AIPanel(props: AIPanelProps) {
       setAnswer(''); setAnswerThinking(''); setAnswerTimestamp(null);
       const selectedText = props.selectedText?.trim() || undefined;
       const rawExcerpt = props.selectedImage ? '〔插图〕' : props.selectedText?.trim() || props.chapter.paragraphs[props.paragraphIndex] || '';
-      props.onSaveConversation({
+      const conversation: AIConversation = {
         id: sessionId.current,
         bookId: props.bookId,
         chapterIndex: props.chapterIndex,
         paragraphIndex: props.paragraphIndex,
         chapterTitle: normalizeChapterTitle(props.chapter.title),
+        title: normalizeConversationTitle(text) || '阅读提问',
         anchorExcerpt: getImageData(rawExcerpt) ? '〔插图〕' : labelNoteReferences(rawExcerpt).slice(0, 180),
         selectedText,
         selectedImage: props.selectedImage || undefined,
@@ -127,7 +132,29 @@ export function AIPanel(props: AIPanelProps) {
         messages: nextMessages,
         createdAt: sessionCreatedAt.current,
         updatedAt: Date.now(),
-      });
+      };
+      props.onSaveConversation(conversation);
+      if (priorMessages.length === 0) {
+        titleController.current?.abort();
+        const titleRequestController = new AbortController();
+        titleController.current = titleRequestController;
+        void generateConversationTitle({
+          settings: props.settings,
+          bookTitle: props.bookTitle,
+          bookAuthor: props.bookAuthor,
+          bookDescription: props.bookDescription,
+          chapter: props.chapter,
+          paragraphIndex: props.paragraphIndex,
+          selectedText,
+          question: text,
+          answer: result,
+          contextRadius,
+          signal: titleRequestController.signal,
+        }).then((title) => {
+          if (!title || sessionId.current !== conversation.id) return;
+          props.onSaveConversation({ ...conversation, title, messages: messagesRef.current, updatedAt: Date.now() });
+        }).catch(() => undefined);
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (e) {
       setAnswerTimestamp(null);

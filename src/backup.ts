@@ -157,6 +157,7 @@ function normalizeConversation(value: unknown): AIConversation | null {
     chapterIndex: Math.max(0, intOr(value.chapterIndex, 0)),
     paragraphIndex: Math.max(0, intOr(value.paragraphIndex, 0)),
     chapterTitle: value.chapterTitle,
+    ...(typeof value.title === 'string' ? { title: value.title } : {}),
     anchorExcerpt: value.anchorExcerpt,
     ...(typeof value.selectedText === 'string' ? { selectedText: value.selectedText } : {}),
     ...(typeof value.selectedImage === 'string' ? { selectedImage: value.selectedImage } : {}),

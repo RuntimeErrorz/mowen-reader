@@ -126,6 +126,25 @@ export function normalizeAIAnswer(value: string) {
   return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+function stripPreviewFormatting(value: string) {
+  return value
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+[.)]\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/(\*\*|__|~~|`+)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Flatten an AI answer for the compact conversation-list preview. */
+export function conversationAnswerPreview(value: string) {
+  const normalized = normalizeAIAnswer(value);
+  return stripPreviewFormatting(normalized);
+}
+
 export function themedMarkdownStyles(palette: ReaderPalette) {
   return {
     body: { color: palette.text },

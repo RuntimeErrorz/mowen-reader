@@ -26,6 +26,24 @@ type AIStreamChunk = {
 
 const questionTask = '顺着读者的问题直接作答；以当前上下文作为切入点，也可以自然补充相关背景、概念、例子和延伸信息。只有答案确实存在不确定性或需要额外条件时，才简短说明。';
 
+const CONVERSATION_TITLE_MAX_LENGTH = 28;
+
+export function normalizeConversationTitle(value: string): string {
+  const withoutThinking = value
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```(?:[a-z-]+)?/gi, '')
+    .replace(/```/g, '');
+  const firstLine = withoutThinking.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '';
+  const title = firstLine
+    .replace(/^(?:标题|title)\s*[:：]\s*/i, '')
+    .replace(/^[`"'“‘]+|[`"'”’]+$/g, '')
+    .replace(/^[#*_\s]+|[#*_\s]+$/g, '')
+    .replace(/[。！？!?；;：:]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return Array.from(title).slice(0, CONVERSATION_TITLE_MAX_LENGTH).join('').trim();
+}
+
 function isImageMarker(text: string) {
   return /^\[\[MOWEN_IMAGE_(?:DATA|FILE|EPUB):[\s\S]+\]\]$/.test(text);
 }
@@ -272,4 +290,41 @@ export async function askAI(options: {
     ],
   };
   return requestWithXhr(`${baseUrl}/chat/completions`, settings.apiKey, requestBody, signal, onDelta, onThinkingDelta);
+}
+
+export async function generateConversationTitle(options: {
+  settings: AISettings;
+  bookTitle: string;
+  bookAuthor: string;
+  bookDescription?: string;
+  chapter: Chapter;
+  paragraphIndex: number;
+  selectedText?: string;
+  question: string;
+  answer: string;
+  contextRadius?: number;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const answerExcerpt = options.answer.replace(/\s+/g, ' ').trim().slice(0, 1600);
+  const titleQuestion = [
+    '请为这次阅读对话生成一个简洁、准确的标题。',
+    '只输出标题本身，不要解释，不要引号、Markdown、前缀或句号。',
+    '使用与读者问题相同的语言，长度控制在 8 到 18 个汉字或字符，概括读者真正想问的核心。',
+    `读者问题：${options.question}`,
+    `助手回答：${answerExcerpt}`,
+  ].join('\n');
+  const response = await askAI({
+    settings: options.settings,
+    bookTitle: options.bookTitle,
+    bookAuthor: options.bookAuthor,
+    bookDescription: options.bookDescription,
+    chapter: options.chapter,
+    paragraphIndex: options.paragraphIndex,
+    selectedText: options.selectedText,
+    question: titleQuestion,
+    contextRadius: options.contextRadius,
+    enableThinking: false,
+    signal: options.signal,
+  });
+  return normalizeConversationTitle(response.content);
 }

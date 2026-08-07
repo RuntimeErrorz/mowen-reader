@@ -8,6 +8,7 @@ import { AIConversation, Bookmark, ReaderPrefs } from '../../types';
 import { getReaderPalette, ReaderPalette } from '../../ui/theme';
 import { styles } from '../../ui/styles';
 import { DraggableSheet, SheetBackdrop } from './DraggableSheet';
+import { conversationAnswerPreview } from './readerUtils';
 
 type TocRow = FoliateTOCItem & {
   index: number;
@@ -119,7 +120,7 @@ export function BookmarksModal(props: {
   onDeleteConversation: (id: string) => void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<'bookmarks' | 'conversations'>('bookmarks');
+  const [tab, setTab] = useState<'bookmarks' | 'conversations'>('conversations');
   const ordered = [...props.bookmarks].sort((a, b) => a.chapterIndex - b.chapterIndex || a.paragraphIndex - b.paragraphIndex);
   const orderedConversations = [...props.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
   return (
@@ -130,8 +131,8 @@ export function BookmarksModal(props: {
           <Pressable onPress={props.onClose} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
         </View>
         <View style={[styles.marginTabs, { borderBottomColor: props.palette.line }]}>
-          <Pressable onPress={() => setTab('bookmarks')} style={[styles.marginTab, tab === 'bookmarks' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'bookmarks' ? props.palette.accent : props.palette.muted }, tab === 'bookmarks' && styles.marginTabTextActive]}>书签 {props.bookmarks.length}</Text></Pressable>
           <Pressable onPress={() => setTab('conversations')} style={[styles.marginTab, tab === 'conversations' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'conversations' ? props.palette.accent : props.palette.muted }, tab === 'conversations' && styles.marginTabTextActive]}>AI 对话 {props.conversations.length}</Text></Pressable>
+          <Pressable onPress={() => setTab('bookmarks')} style={[styles.marginTab, tab === 'bookmarks' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'bookmarks' ? props.palette.accent : props.palette.muted }, tab === 'bookmarks' && styles.marginTabTextActive]}>书签 {props.bookmarks.length}</Text></Pressable>
         </View>
         {tab === 'bookmarks' ? <>
         <FlatList
@@ -159,14 +160,14 @@ export function BookmarksModal(props: {
           renderItem={({ item }) => {
             const firstQuestion = item.messages.find((message) => message.role === 'user')?.content ?? '阅读提问';
             const lastAnswer = [...item.messages].reverse().find((message) => message.role === 'assistant')?.content ?? '';
+            const conversationTitle = (item.title?.trim() || firstQuestion).replace(/\s+/g, ' ');
             return (
               <Pressable onPress={() => props.onChooseConversation(item)} style={({ pressed }) => [styles.conversationItem, { borderBottomColor: props.palette.line }, pressed && styles.pressed]}>
-                <View style={[styles.conversationSpark, { backgroundColor: props.palette.accent }]}><Ionicons name="sparkles" size={14} color={props.palette.onAccent} /></View>
                 <View style={styles.bookmarkContent}>
                   <Text numberOfLines={1} style={[styles.bookmarkChapter, { color: props.palette.accent }]}>{normalizeChapterTitle(item.chapterTitle)}</Text>
                   <Text style={[styles.bookmarkLocation, { color: props.palette.muted }]}>第 {item.chapterIndex + 1} 章 · 位置 {item.paragraphIndex + 1} · {item.messages.length / 2} 轮</Text>
-                  <Text numberOfLines={1} style={[styles.conversationQuestion, { color: props.palette.text }]}>{firstQuestion}</Text>
-                  <Text numberOfLines={2} style={[styles.bookmarkExcerpt, { color: props.palette.text }]}>{lastAnswer.replace(/[#*_>`]/g, '')}</Text>
+                  <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.conversationTitle, { color: props.palette.text }]}>{conversationTitle}</Text>
+                  <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.conversationExcerpt, { color: props.palette.text }]}>{conversationAnswerPreview(lastAnswer)}</Text>
                 </View>
                 <Pressable accessibilityLabel="删除对话" onPress={(event) => { event.stopPropagation(); props.onDeleteConversation(item.id); }} style={styles.bookmarkDelete}><Ionicons name="close" size={17} color={props.palette.muted} /></Pressable>
               </Pressable>

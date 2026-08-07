@@ -94,6 +94,8 @@ export type AIConversation = {
   chapterIndex: number;
   paragraphIndex: number;
   chapterTitle: string;
+  /** AI-generated label for the conversation; older records may not have one. */
+  title?: string;
   anchorExcerpt: string;
   /** Optional context captured when the conversation was started. */
   selectedText?: string;

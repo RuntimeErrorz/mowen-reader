@@ -273,6 +273,8 @@ function SortableBookTile(props: {
   const deleteOpacity = useRef(new Animated.Value(1)).current;
   const deleteScale = useRef(new Animated.Value(1)).current;
   const wasHidden = useRef(!!props.hidden);
+  const hasPositioned = useRef(false);
+  const lastTileWidth = useRef(props.tileWidth);
   const gestureMode = useRef<'idle' | 'pending' | 'pendingDelete' | 'dragReady' | 'dragging' | 'ending' | 'deleting'>('idle');
   const touchCount = useRef(0);
   const touchStart = useRef({ x: 0, y: 0 });
@@ -283,14 +285,20 @@ function SortableBookTile(props: {
 
   useLayoutEffect(() => {
     const nextPosition = { x: props.position.left, y: props.position.top };
+    const layoutChanged = hasPositioned.current && lastTileWidth.current !== props.tileWidth;
     if (wasHidden.current && !props.hidden) {
       position.stopAnimation();
       position.setValue(nextPosition);
-    } else if (!props.overlay) {
+    } else if (!hasPositioned.current || layoutChanged || props.overlay) {
+      position.stopAnimation();
+      position.setValue(nextPosition);
+    } else {
       Animated.spring(position, { ...SPRING_CONFIG, toValue: nextPosition }).start();
     }
     wasHidden.current = !!props.hidden;
-  }, [position, props.hidden, props.overlay, props.position.left, props.position.top]);
+    hasPositioned.current = true;
+    lastTileWidth.current = props.tileWidth;
+  }, [position, props.hidden, props.overlay, props.position.left, props.position.top, props.tileWidth]);
 
   useEffect(() => {
     if (props.deleting) {
@@ -436,10 +444,12 @@ function SortableBookTile(props: {
         styles.bookTileWrap,
         styles.sortableTile,
         { width: props.tileWidth, zIndex: props.overlay ? 40 : props.deleting ? 20 : 1, elevation: props.overlay ? 12 : 4 },
-        { opacity: props.hidden ? 0 : deleteOpacity, transform: [{ translateX }, { translateY }, { scale: deleteScale }] },
+        { opacity: deleteOpacity, transform: [{ translateX }, { translateY }, { scale: deleteScale }] },
       ]}
     >
-      <BookTileContent book={props.book} palette={props.palette} loading={props.loading} pressed={pressed} markedForRemoval={props.markedForRemoval} />
+      <View style={{ opacity: props.hidden ? 0 : 1 }}>
+        <BookTileContent book={props.book} palette={props.palette} loading={props.loading} pressed={pressed} markedForRemoval={props.markedForRemoval} />
+      </View>
     </Animated.View>
   );
 }
