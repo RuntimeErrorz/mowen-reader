@@ -4,7 +4,7 @@ import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { BookSummary } from '../types';
-import { BOOK_COVER_ASPECT_RATIO, C, ReaderPalette } from '../ui/theme';
+import { BOOK_COVER_ASPECT_RATIO, ReaderPalette } from '../ui/theme';
 import { styles } from '../ui/styles';
 
 type SortableBookGridProps = {
@@ -182,7 +182,6 @@ export function SortableBookGrid(props: SortableBookGridProps) {
               palette={props.palette}
               position={slotForIndex(dragState.originIndex)}
               tileWidth={metrics.tileWidth}
-              loading={false}
               disabled={!!props.openingBookId || props.removalPending || !!deletingId}
               deleting={false}
               markedForRemoval={false}
@@ -203,7 +202,6 @@ export function SortableBookGrid(props: SortableBookGridProps) {
             palette={props.palette}
             position={position}
             tileWidth={metrics.tileWidth}
-            loading={props.openingBookId === book.id}
             disabled={!!props.openingBookId || props.removalPending || !!deletingId}
             deleting={deletingId === book.id}
             markedForRemoval={props.pendingRemovalId === book.id}
@@ -224,7 +222,6 @@ export function SortableBookGrid(props: SortableBookGridProps) {
           palette={props.palette}
           position={slotForIndex(dragState.originIndex)}
           tileWidth={metrics.tileWidth}
-          loading={false}
           disabled
           deleting={false}
           markedForRemoval={false}
@@ -255,7 +252,6 @@ function SortableBookTile(props: {
   palette: ReaderPalette;
   position: GridPoint;
   tileWidth: number;
-  loading: boolean;
   disabled: boolean;
   deleting: boolean;
   markedForRemoval: boolean;
@@ -448,13 +444,13 @@ function SortableBookTile(props: {
       ]}
     >
       <View style={{ opacity: props.hidden ? 0 : 1 }}>
-        <BookTileContent book={props.book} palette={props.palette} loading={props.loading} pressed={pressed} markedForRemoval={props.markedForRemoval} />
+        <BookTileContent book={props.book} palette={props.palette} pressed={pressed} markedForRemoval={props.markedForRemoval} />
       </View>
     </Animated.View>
   );
 }
 
-function BookTileContent({ book, palette, loading, pressed, markedForRemoval }: { book: BookSummary; palette: ReaderPalette; loading: boolean; pressed: boolean; markedForRemoval: boolean }) {
+function BookTileContent({ book, palette, pressed, markedForRemoval }: { book: BookSummary; palette: ReaderPalette; pressed: boolean; markedForRemoval: boolean }) {
   const colors = coverColorsFor(book.id);
   return (
     <View>
@@ -467,7 +463,6 @@ function BookTileContent({ book, palette, loading, pressed, markedForRemoval }: 
             <Text style={styles.coverSeal}>墨问</Text>
           </LinearGradient>
         )}
-        {loading && <View style={styles.bookOpening}><ActivityIndicator color={C.white} /></View>}
         {markedForRemoval && <View style={[styles.bookRemovalMarker, { backgroundColor: palette.danger }]}><Ionicons name="trash-outline" size={14} color={palette.onAccent} /></View>}
         {book.progress > 0 && <View style={styles.bookProgress}><View style={[styles.bookProgressFill, { width: `${Math.min(1, book.progress) * 100}%` }]} /></View>}
       </View>

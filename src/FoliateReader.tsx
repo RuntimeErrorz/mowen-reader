@@ -200,7 +200,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
     try { message = JSON.parse(event.nativeEvent.data) as HostMessage; }
     catch { return; }
     if (message.type === 'host-ready') { void sendBook(); return; }
-    if (message.type === 'book-ready') { setLoading(false); props.onReady(message.toc); return; }
+    if (message.type === 'book-ready') { requestAnimationFrame(() => requestAnimationFrame(() => setLoading(false))); props.onReady(message.toc); return; }
     if (message.type === 'relocate') { props.onLocationChange(message); return; }
     if (message.type === 'center-tap') { props.onCenterTap(); return; }
     if (message.type === 'long-press') {
@@ -290,7 +290,7 @@ function FoliateReaderComponent(props: Props, ref: React.ForwardedRef<FoliateRea
           setLoading(false);
           props.onError(message);
         }}
-        style={{ backgroundColor: props.palette.bg }}
+        style={{ backgroundColor: props.palette.bg, opacity: loading && !error ? 0 : 1 }}
       />
       {loading && !error && (
         <View pointerEvents="none" style={[StyleSheet.absoluteFillObject, styles.loading, { backgroundColor: props.palette.bg }]}>

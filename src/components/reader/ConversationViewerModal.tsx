@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { askAI, buildAIRequestText } from '../../ai';
@@ -16,6 +16,7 @@ import { AIMessageMarkdown } from './AIMessageMarkdown';
 import { AIThinkingTrace } from './AIThinkingTrace';
 import { AIThinkingToggle } from './AIThinkingToggle';
 import { useAutoScrollToLatest } from './useAutoScrollToLatest';
+import { ImagePreviewOverlay } from './ImagePreviewOverlay';
 
 export function ConversationViewerModal(props: {
   conversation: AIConversation | null;
@@ -153,7 +154,15 @@ export function ConversationViewerModal(props: {
       setError(cause instanceof Error ? cause.message : '继续对话失败');
     } finally { setLoading(false); }
   };
-  const stay = () => { Keyboard.dismiss(); props.onStay(); };
+  const closePreview = () => setPreviewImage(null);
+  const stay = () => {
+    if (previewImage) {
+      closePreview();
+      return;
+    }
+    Keyboard.dismiss();
+    props.onStay();
+  };
   const returnToAnchor = () => { Keyboard.dismiss(); props.onReturn(); };
 
   return (
@@ -218,16 +227,7 @@ export function ConversationViewerModal(props: {
               </View>
             </View>
           </DraggableSheet>
-          {!!previewImage && <View style={[StyleSheet.absoluteFill, styles.imagePreviewRoot, { backgroundColor: props.palette.scrim }]}>
-            <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewImage(null)} />
-            <View style={[styles.imagePreviewCard, { backgroundColor: props.palette.surface, borderColor: props.palette.line }]}>
-              <Image source={{ uri: previewImage }} resizeMode="contain" style={styles.imagePreviewImage} />
-              <View style={[styles.imagePreviewFooter, { borderTopColor: props.palette.line }]}>
-                <Text style={[styles.imagePreviewLabel, { color: props.palette.muted }]}>上下文图片 {Math.max(0, contextImageUris.indexOf(previewImage) + 1)} / {contextImageUris.length}</Text>
-                <Pressable accessibilityLabel="关闭图片预览" onPress={() => setPreviewImage(null)} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
-              </View>
-            </View>
-          </View>}
+          <ImagePreviewOverlay imageUri={previewImage} onClose={closePreview} />
         </KeyboardAvoidingView>
       </View>
     </Modal>

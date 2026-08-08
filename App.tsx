@@ -202,6 +202,7 @@ export default function App() {
             conversations={conversations.filter((item) => item.bookId === book.id)}
             onBack={() => { setScreen('library'); setBook(null); }}
             onPrefs={async (value) => { setPrefs(value); await savePrefs(value); }}
+            onPreviewPrefs={(value) => setPrefs(value)}
             onProgress={(chapter, paragraph, locator) => updateProgress(book.id, chapter, paragraph, book, locator)}
             onAISettings={() => setSettingsOpen(true)}
             onBookmarksChange={async (nextBookBookmarks) => {

@@ -20,6 +20,7 @@ export type ReaderScreenProps = {
   conversations: AIConversation[];
   onBack: () => void;
   onPrefs: (value: ReaderPrefs) => void;
+  onPreviewPrefs: (value: ReaderPrefs) => void;
   onProgress: (chapter: number, paragraph: number, locator?: EpubLocator) => void;
   onAISettings: () => void;
   onBookmarksChange: (bookmarks: Bookmark[]) => void;
@@ -326,7 +327,7 @@ function FoliateReaderScreen(props: ReaderScreenProps & { epubUri: string }) {
         {bookmarkSelecting && !readerNavigation.noteOpen && !imageViewerOpen && <View style={styles.bookmarkSelectionActions}><Pressable accessibilityLabel="取消摘录" onPress={cancelBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.control, borderColor: palette.line }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.muted }]}>取消</Text></Pressable><Pressable accessibilityLabel="保存摘录书签" disabled={!bookmarkSelection?.cfi} onPress={saveBookmarkSelection} style={[styles.bookmarkSelectionButton, { backgroundColor: palette.accent, borderColor: palette.accent }, !bookmarkSelection?.cfi && { opacity: 0.4 }]}><Text style={[styles.bookmarkSelectionButtonText, { color: palette.onAccent }]}>标记</Text></Pressable></View>}
         {dragProgress !== null && !readerNavigation.noteOpen && !imageViewerOpen && <View pointerEvents="none" style={[styles.liveProgressCard, { backgroundColor: palette.bar, borderColor: palette.line }]}><View style={styles.liveProgressTop}><Text style={[styles.liveProgressLabel, { color: palette.accent }]}>全书进度</Text><Text style={[styles.liveProgressPercent, { color: palette.text }]}>{Math.round(dragProgress * 100)}%</Text></View><Text numberOfLines={1} style={[styles.liveProgressChapter, { color: palette.text }]}>{progressChapterTitle}</Text><View style={[styles.liveProgressTrack, { backgroundColor: palette.line }]}><View style={[styles.liveProgressFill, { backgroundColor: palette.accent, width: `${dragProgress * 100}%` }]} /></View></View>}
         <TOCModal palette={palette} visible={tocOpen} chapters={tocItems} current={currentToc} onChoose={chooseToc} onClose={() => setTocOpen(false)} />
-        <TypeModal visible={typeOpen} value={props.prefs} onChange={props.onPrefs} onClose={() => setTypeOpen(false)} />
+        <TypeModal visible={typeOpen} value={props.prefs} onChange={props.onPrefs} onPreview={props.onPreviewPrefs} onClose={() => setTypeOpen(false)} />
         <BookmarksModal visible={bookmarksOpen} bookmarks={props.bookmarks} chapterTitle={chapter.title} paragraphIndex={paragraphIndex} onChoose={(bookmark) => { setBookmarksOpen(false); if (bookmark.locator?.type === 'application/epub+cfi') readerRef.current?.goTo(bookmark.locator.href); else goToChapter(bookmark.chapterIndex); }} onDelete={deleteBookmark} conversations={props.conversations} onChooseConversation={openConversation} onDeleteConversation={props.onConversationDelete} onClose={() => setBookmarksOpen(false)} palette={palette} />
         <SearchModal visible={searchOpen} palette={palette} query={searchQuery} results={searchResults} searching={searchRunning} progress={searchProgress} error={searchError} onQueryChange={setSearchQuery} onChoose={chooseSearchResult} onClear={clearSearchQuery} onClose={closeSearchPanel} />
       </SafeAreaView>

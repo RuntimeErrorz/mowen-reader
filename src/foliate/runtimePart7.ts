@@ -248,8 +248,6 @@ export const FOLIATE_BRIDGE_PART_7 = String.raw`hanged.find(point => point.ident
         if (!root.classList.contains('open')) return;
         event.preventDefault();
         event.stopPropagation();
-        const control = event.target?.closest?.('#image-viewer-close');
-        if (control?.id === 'image-viewer-close') { close(); return; }
         const touches = Array.from(event.touches || []);
         if (touches.length >= 2) return;
         if (touches.length === 1) {
@@ -281,7 +279,6 @@ export const FOLIATE_BRIDGE_PART_7 = String.raw`hanged.find(point => point.ident
         event.stopPropagation();
         toggleZoom();
       });
-      document.getElementById('image-viewer-close')?.addEventListener('click', close);
       image.addEventListener('load', render);
       viewer.close = close;
       root.__mowenImageViewer = viewer;

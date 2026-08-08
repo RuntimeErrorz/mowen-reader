@@ -6,7 +6,7 @@ export const FOLIATE_HTML = `<!doctype html>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body,foliate-view,foliate-paginator{margin:0;width:100%;height:100%;overflow:hidden}
-html,body{background:#fff}
+html,body{background:transparent}
 #reader-shell{position:fixed;inset:0;overflow:hidden}
 #page-stage,#page-current,.page-preview{position:absolute;inset:0;overflow:hidden}
 #page-stage{contain:layout paint;isolation:isolate}
@@ -37,12 +37,10 @@ foliate-view::part(head),foliate-view::part(foot){display:none}
 #note-content img,#note-content svg,#note-content video{display:block;max-width:100%!important;width:auto!important;height:auto!important;margin-inline:auto}
 #note-content article a{color:var(--accent)!important}
 #note-close{position:absolute;z-index:2;right:8px;top:8px;width:34px;height:34px;border:0;border-radius:17px;background:var(--bg);color:var(--muted);font-size:22px}
-#image-viewer{display:none;position:fixed;z-index:2147483646;inset:0;background:#000;align-items:center;justify-content:center;touch-action:none;user-select:none;-webkit-user-select:none}
-#image-viewer.open{display:flex}
-#image-viewer-surface{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
-#image-viewer-image{display:block;max-width:90vw;max-height:80vh;width:auto;height:auto;object-fit:contain;transform-origin:center center;touch-action:none;user-select:none;-webkit-user-drag:none}
-#image-viewer-toolbar{position:absolute;z-index:2;top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;display:flex;gap:8px}
-#image-viewer-toolbar button{min-width:42px;height:42px;border:0;padding:0;background:transparent;color:#fff;font-size:28px;line-height:42px}
-  </style></head><body><div id="reader-shell"><div id="page-stage"><div id="page-preview-prev" class="page-preview"></div><div id="page-current"></div><div id="page-preview-next" class="page-preview"></div></div></div><div id="bookmark-selection-handle-start" class="bookmark-selection-handle" data-endpoint="start" aria-hidden="true"></div><div id="bookmark-selection-handle-end" class="bookmark-selection-handle" data-endpoint="end" aria-hidden="true"></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div><div id="image-viewer" aria-hidden="true"><div id="image-viewer-surface"><img id="image-viewer-image" alt="正文图片" draggable="false"><div id="image-viewer-toolbar"><button id="image-viewer-close" type="button" aria-label="关闭图片">×</button></div></div></div></body></html>`;
+  #image-viewer{display:none;position:fixed;z-index:2147483646;inset:0;background:#000;align-items:center;justify-content:center;touch-action:none;user-select:none;-webkit-user-select:none}
+  #image-viewer.open{display:flex}
+  #image-viewer-surface{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
+  #image-viewer-image{display:block;max-width:92vw;max-height:90vh;width:auto;height:auto;object-fit:contain;transform-origin:center center;touch-action:none;user-select:none;-webkit-user-drag:none}
+  </style></head><body><div id="reader-shell"><div id="page-stage"><div id="page-preview-prev" class="page-preview"></div><div id="page-current"></div><div id="page-preview-next" class="page-preview"></div></div></div><div id="bookmark-selection-handle-start" class="bookmark-selection-handle" data-endpoint="start" aria-hidden="true"></div><div id="bookmark-selection-handle-end" class="bookmark-selection-handle" data-endpoint="end" aria-hidden="true"></div><div id="note-backdrop"><div id="note-card"><button id="note-close" aria-label="关闭">×</button><div id="note-title">注释</div><div id="note-content"></div></div></div><div id="image-viewer" aria-hidden="true"><div id="image-viewer-surface"><img id="image-viewer-image" alt="正文图片" draggable="false"></div></div></body></html>`;
 export const FOLIATE_BRIDGE = FOLIATE_BRIDGE_PARTS.join('');
 

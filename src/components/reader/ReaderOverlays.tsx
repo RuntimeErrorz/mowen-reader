@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, FlatList, Modal, Platform, Pressable, ScrollView, Switch, Text, View } from 'react-native';
+import { Animated, FlatList, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { FoliateTOCItem } from '../../FoliateReader';
@@ -15,6 +15,10 @@ type TocRow = FoliateTOCItem & {
   parentIndex: number | null;
   hasChildren: boolean;
 };
+
+const TYPE_SCROLL_BOTTOM_PADDING = 34;
+const TOC_DEPTH_INDENT = 30;
+const TOC_LEAF_ARROW_INSET = 7;
 
 function buildTocRows(items: FoliateTOCItem[]): TocRow[] {
   const parentAtDepth: Array<number | undefined> = [];
@@ -34,6 +38,16 @@ function buildTocRows(items: FoliateTOCItem[]): TocRow[] {
   });
 }
 
+function getAncestorIndices(rows: TocRow[], index: number) {
+  const ancestors = new Set<number>();
+  let parentIndex = rows[index]?.parentIndex ?? null;
+  while (parentIndex !== null) {
+    ancestors.add(parentIndex);
+    parentIndex = rows[parentIndex]?.parentIndex ?? null;
+  }
+  return ancestors;
+}
+
 export function TOCModal({ palette, visible, chapters, current, onChoose, onClose }: { palette: ReaderPalette; visible: boolean; chapters: FoliateTOCItem[]; current: number; onChoose: (index: number) => void; onClose: () => void }) {
   const listRef = useRef<FlatList<TocRow>>(null);
   const rows = React.useMemo(() => buildTocRows(chapters), [chapters]);
@@ -50,8 +64,12 @@ export function TOCModal({ palette, visible, chapters, current, onChoose, onClos
   const currentVisibleIndex = visibleRows.findIndex((row) => row.index === currentIndex);
 
   useEffect(() => {
-    setExpanded(new Set());
-  }, [rows, visible]);
+    if (!visible) {
+      setExpanded(new Set());
+      return;
+    }
+    setExpanded(getAncestorIndices(rows, currentIndex));
+  }, [currentIndex, rows, visible]);
 
   useEffect(() => {
     if (!visible || currentVisibleIndex < 0) return;
@@ -71,7 +89,7 @@ export function TOCModal({ palette, visible, chapters, current, onChoose, onClos
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={palette}>
-        <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: palette.accent }]}>CONTENTS</Text><Text style={[styles.sheetTitle, { color: palette.text }]}>目录</Text></View><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: palette.surfaceAlt }]}><Ionicons name="close" size={20} color={palette.text} /></Pressable></View>
+        <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: palette.accent }]}>CONTENTS</Text><Text style={[styles.sheetTitle, { color: palette.text }]}>目录</Text></View></View>
         <FlatList
           ref={listRef}
           style={styles.tocList}
@@ -82,21 +100,20 @@ export function TOCModal({ palette, visible, chapters, current, onChoose, onClos
           onScrollToIndexFailed={(info) => listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false })}
           renderItem={({ item }) => {
             const isCurrent = item.index === currentIndex;
-            const itemPaddingLeft = item.depth * 12;
+            const itemPaddingLeft = item.depth * TOC_DEPTH_INDENT + (item.hasChildren ? 0 : TOC_LEAF_ARROW_INSET);
             return (
               <Pressable
                 accessibilityRole="button"
                 onPress={() => onChoose(item.index)}
-                style={[styles.tocItem, { borderBottomColor: palette.line, paddingLeft: itemPaddingLeft }, isCurrent && { backgroundColor: palette.focus, borderBottomWidth: 0 }]}
+                style={[styles.tocItem, { borderBottomColor: isCurrent ? palette.accent : palette.line, borderBottomWidth: isCurrent ? 1 : StyleSheet.hairlineWidth, paddingLeft: itemPaddingLeft }, isCurrent && { backgroundColor: palette.focus, borderTopColor: palette.accent, borderTopWidth: 1 }]}
               >
-                {item.hasChildren ? <Pressable
+                {item.hasChildren && <Pressable
                   accessibilityLabel={expanded.has(item.index) ? `收起${item.label}` : `展开${item.label}`}
                   accessibilityRole="button"
                   onPress={(event) => { event.stopPropagation(); toggleRow(item.index); }}
                   style={styles.tocDisclosure}
-                ><Ionicons name={expanded.has(item.index) ? 'chevron-down' : 'chevron-forward'} size={17} color={isCurrent ? palette.accent : palette.muted} /></Pressable> : <View style={styles.tocDisclosureSpacer} />}
+                ><Ionicons name={expanded.has(item.index) ? 'chevron-down' : 'chevron-forward'} size={17} color={isCurrent ? palette.accent : palette.muted} /></Pressable>}
                 <Text numberOfLines={2} style={[styles.tocTitle, { color: isCurrent ? palette.accent : palette.text }]}>{item.label}</Text>
-                {isCurrent && <View style={[styles.currentDot, { backgroundColor: palette.accent }]} />}
               </Pressable>
             );
           }}
@@ -128,7 +145,6 @@ export function BookmarksModal(props: {
       <DraggableSheet visible={props.visible} onClose={props.onClose} palette={props.palette} style={styles.bookmarksSheet}>
         <View style={styles.sheetHeader}>
           <View><Text style={[styles.sheetEyebrow, { color: props.palette.accent }]}>MARGINALIA</Text><Text style={[styles.sheetTitle, { color: props.palette.text }]}>页边</Text></View>
-          <Pressable onPress={props.onClose} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}><Ionicons name="close" size={20} color={props.palette.text} /></Pressable>
         </View>
         <View style={[styles.marginTabs, { borderBottomColor: props.palette.line }]}>
           <Pressable onPress={() => setTab('conversations')} style={[styles.marginTab, tab === 'conversations' && { borderBottomColor: props.palette.accent }]}><Text style={[styles.marginTabText, { color: tab === 'conversations' ? props.palette.accent : props.palette.muted }, tab === 'conversations' && styles.marginTabTextActive]}>AI 对话 {props.conversations.length}</Text></Pressable>
@@ -179,61 +195,96 @@ export function BookmarksModal(props: {
   );
 }
 
-export function TypeModal({ visible, value, onChange, onClose }: { visible: boolean; value: ReaderPrefs; onChange: (value: ReaderPrefs) => void; onClose: () => void }) {
+export function TypeModal({ visible, value, onChange, onPreview, onClose }: { visible: boolean; value: ReaderPrefs; onChange: (value: ReaderPrefs) => void; onPreview: (value: ReaderPrefs) => void; onClose: () => void }) {
   const previewPalette = getReaderPalette(value.theme);
-  const themes: { key: ReaderPrefs['theme']; name: string; color: string }[] = [
-    { key: 'paper', name: '纸白', color: '#E9ECE5' },
-    { key: 'wheat', name: '麦纸', color: '#F1DFB7' },
-    { key: 'mist', name: '雾蓝', color: '#DDE7E5' },
-    { key: 'night', name: '夜墨', color: '#17292D' },
+  const bottomPadding = Math.round(value.pagePaddingBottom);
+  const horizontalPadding = Math.round((value.pagePaddingLeft + value.pagePaddingRight) / 2);
+  const previewFrame = useRef<number | null>(null);
+  const pendingPreview = useRef<ReaderPrefs | null>(null);
+  const [scrollMetrics, setScrollMetrics] = useState({ contentHeight: 0, layoutHeight: 0 });
+  const scrollEnabled = scrollMetrics.layoutHeight > 0 && scrollMetrics.contentHeight - TYPE_SCROLL_BOTTOM_PADDING > scrollMetrics.layoutHeight + 1;
+  const themes: { key: ReaderPrefs['theme']; name: string; color: string; textColor: string }[] = [
+    { key: 'paper', name: '纸白', color: '#E9ECE5', textColor: '#263D3E' },
+    { key: 'wheat', name: '麦纸', color: '#F1DFB7', textColor: '#4A3D2B' },
+    { key: 'mist', name: '雾蓝', color: '#DDE7E5', textColor: '#244247' },
+    { key: 'night', name: '夜墨', color: '#17292D', textColor: '#F3F0E6' },
   ];
+  const previewPrefs = React.useCallback((next: ReaderPrefs) => {
+    pendingPreview.current = next;
+    if (previewFrame.current !== null) return;
+    previewFrame.current = requestAnimationFrame(() => {
+      previewFrame.current = null;
+      const pending = pendingPreview.current;
+      pendingPreview.current = null;
+      if (pending) onPreview(pending);
+    });
+  }, [onPreview]);
+  useEffect(() => () => {
+    if (previewFrame.current !== null) cancelAnimationFrame(previewFrame.current);
+    previewFrame.current = null;
+    pendingPreview.current = null;
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    if (
+      value.pagePaddingTop === 0 &&
+      value.pagePaddingLeft === horizontalPadding &&
+      value.pagePaddingRight === horizontalPadding
+    ) return;
+    onChange({
+      ...value,
+      pagePaddingTop: 0,
+      pagePaddingLeft: horizontalPadding,
+      pagePaddingRight: horizontalPadding,
+      pagePadding: horizontalPadding,
+    });
+  }, [visible]);
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <DraggableSheet visible={visible} onClose={onClose} palette={previewPalette} style={styles.typeSheet}>
-        <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: previewPalette.accent }]}>READING STYLE</Text><Text style={[styles.sheetTitle, { color: previewPalette.text }]}>阅读外观</Text></View><Pressable onPress={onClose} style={[styles.closeButton, { backgroundColor: previewPalette.surfaceAlt }]}><Ionicons name="close" size={20} color={previewPalette.text} /></Pressable></View>
-        <ScrollView contentContainerStyle={styles.typeScroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.layoutPairRow}>
-          <View style={styles.layoutPairGroup}>
-            <Text style={[styles.controlLabel, styles.layoutPairLabel, { color: previewPalette.muted }]}>翻页方式</Text>
-            <View style={styles.optionRow}>
+        <View style={styles.sheetHeader}><View><Text style={[styles.sheetEyebrow, { color: previewPalette.accent }]}>READING STYLE</Text><Text style={[styles.sheetTitle, { color: previewPalette.text }]}>阅读外观</Text></View></View>
+        <ScrollView style={styles.typeScroll} contentContainerStyle={styles.typeScrollContent} scrollEnabled={scrollEnabled} onLayout={(event) => setScrollMetrics((previous) => ({ ...previous, layoutHeight: event.nativeEvent.layout.height }))} onContentSizeChange={(_, height) => setScrollMetrics((previous) => ({ ...previous, contentHeight: height }))} showsVerticalScrollIndicator={false} bounces={false} alwaysBounceVertical={false} overScrollMode="never">
+          <View style={[styles.readingModeRow, { borderBottomColor: previewPalette.line }]}>
+            <View style={styles.readingModeOptions}>
               <AppearanceOption palette={previewPalette} label="上下连续" active={value.readingMode === 'scroll'} onPress={() => onChange({ ...value, readingMode: 'scroll' })} />
               <AppearanceOption palette={previewPalette} label="左右翻页" active={value.readingMode === 'paged'} onPress={() => onChange({ ...value, readingMode: 'paged' })} />
             </View>
           </View>
-          <View style={styles.layoutPairGroup}>
-            <Text style={[styles.controlLabel, styles.layoutPairLabel, { color: previewPalette.muted }]}>文字对齐</Text>
-            <View style={styles.optionRow}>
-              <AppearanceOption palette={previewPalette} label="左对齐" active={value.textAlign === 'left'} onPress={() => onChange({ ...value, textAlign: 'left' })} />
-              <AppearanceOption palette={previewPalette} label="两端对齐" active={value.textAlign === 'justify'} onPress={() => onChange({ ...value, textAlign: 'justify' })} />
+
+          <Text style={[styles.appearanceSectionLabel, { color: previewPalette.muted }]}>文字</Text>
+          <View style={styles.fontAndTypefaceRow}>
+            <View style={[styles.fontStyleCard, { backgroundColor: previewPalette.control, borderColor: previewPalette.line }]}>
+              <View style={styles.optionRow}>
+                <AppearanceOption palette={previewPalette} label="宋体" active={value.fontStyle === 'serif'} onPress={() => onChange({ ...value, fontStyle: 'serif' })} />
+                <AppearanceOption palette={previewPalette} label="黑体" active={value.fontStyle === 'sans'} onPress={() => onChange({ ...value, fontStyle: 'sans' })} />
+              </View>
+            </View>
+            <SpacingSlider palette={previewPalette} label="字号" value={value.fontSize} minimum={14} maximum={36} step={1} format={(next) => `${Math.round(next)} pt`} onPreview={(fontSize) => previewPrefs({ ...value, fontSize })} onChange={(fontSize) => onChange({ ...value, fontSize })} />
+          </View>
+
+          <View style={styles.paragraphSectionHeader}>
+            <Text style={[styles.appearanceSectionLabel, styles.paragraphSectionTitle, { color: previewPalette.muted }]}>段落</Text>
+            <View style={styles.paragraphIndentControl}>
+              <Text style={[styles.paragraphIndentLabel, { color: previewPalette.text }]}>首行缩进</Text>
+              <Switch accessibilityLabel="首行缩进" value={value.firstLineIndent} onValueChange={(firstLineIndent) => onChange({ ...value, firstLineIndent })} trackColor={{ false: previewPalette.line, true: previewPalette.focus }} thumbColor={value.firstLineIndent ? previewPalette.accent : previewPalette.muted} />
             </View>
           </View>
-        </View>
-        <View style={styles.fontSizeSliderRow}>
-          <SpacingSlider palette={previewPalette} label="字号" value={value.fontSize} minimum={14} maximum={36} step={1} format={(next) => `${Math.round(next)} pt`} onChange={(fontSize) => onChange({ ...value, fontSize })} />
-        </View>
-        <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>正文字体</Text>
-        <View style={styles.optionRow}>
-          <AppearanceOption palette={previewPalette} label="宋体" active={value.fontStyle === 'serif'} onPress={() => onChange({ ...value, fontStyle: 'serif' })} />
-          <AppearanceOption palette={previewPalette} label="黑体" active={value.fontStyle === 'sans'} onPress={() => onChange({ ...value, fontStyle: 'sans' })} />
-        </View>
-        <View style={[styles.inlineSettingRow, { backgroundColor: previewPalette.control, borderColor: previewPalette.line }]}>
-          <View style={styles.inlineSettingCopy}><Text style={[styles.inlineSettingTitle, { color: previewPalette.text }]}>首行缩进</Text><Text style={[styles.inlineSettingHint, { color: previewPalette.muted }]}>正文段落缩进两个汉字</Text></View>
-          <View style={styles.inlineSettingControl}><Text style={[styles.inlineSettingValue, { color: value.firstLineIndent ? previewPalette.accent : previewPalette.muted }]}>{value.firstLineIndent ? '打开' : '关闭'}</Text><Switch accessibilityLabel="首行缩进" value={value.firstLineIndent} onValueChange={(firstLineIndent) => onChange({ ...value, firstLineIndent })} trackColor={{ false: previewPalette.line, true: previewPalette.focus }} thumbColor={value.firstLineIndent ? previewPalette.accent : previewPalette.muted} /></View>
-        </View>
-        <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>排版间距</Text>
-        <View style={styles.spacingSliderRow}>
-          <SpacingSlider palette={previewPalette} label="行距" value={value.lineHeight} minimum={1} maximum={3} step={0.1} format={(next) => next.toFixed(1)} onChange={(lineHeight) => onChange({ ...value, lineHeight })} />
-          <SpacingSlider palette={previewPalette} label="段间距" value={value.paragraphSpacing} minimum={0} maximum={64} step={2} format={(next) => String(Math.round(next))} onChange={(paragraphSpacing) => onChange({ ...value, paragraphSpacing })} />
-        </View>
-        <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>页面边距</Text>
-        <View style={styles.marginGrid}>
-          <MarginSlider palette={previewPalette} icon="arrow-up" label="上边" value={value.pagePaddingTop} onChange={(pagePaddingTop) => onChange({ ...value, pagePaddingTop })} />
-          <MarginSlider palette={previewPalette} icon="arrow-down" label="下边" value={value.pagePaddingBottom} onChange={(pagePaddingBottom) => onChange({ ...value, pagePaddingBottom })} />
-          <MarginSlider palette={previewPalette} icon="arrow-back" label="左边" value={value.pagePaddingLeft} onChange={(pagePaddingLeft) => onChange({ ...value, pagePaddingLeft, pagePadding: Math.round((pagePaddingLeft + value.pagePaddingRight) / 2) })} />
-          <MarginSlider palette={previewPalette} icon="arrow-forward" label="右边" value={value.pagePaddingRight} onChange={(pagePaddingRight) => onChange({ ...value, pagePaddingRight, pagePadding: Math.round((value.pagePaddingLeft + pagePaddingRight) / 2) })} />
-        </View>
-        <Text style={[styles.controlLabel, { color: previewPalette.muted }]}>纸张</Text>
-        <View style={styles.themeRow}>{themes.map((theme) => <Pressable key={theme.key} onPress={() => onChange({ ...value, theme: theme.key })} style={[styles.themeChoice, { borderColor: value.theme === theme.key ? previewPalette.accent : previewPalette.line, backgroundColor: value.theme === theme.key ? previewPalette.focus : previewPalette.surface }]}><View style={[styles.themeSwatch, { backgroundColor: theme.color, borderColor: previewPalette.line }]} /><Text style={[styles.themeName, { color: previewPalette.text }]}>{theme.name}</Text></Pressable>)}</View>
+          <View style={styles.paragraphAlignRow}>
+            <AppearanceOption palette={previewPalette} label="左对齐" active={value.textAlign === 'left'} onPress={() => onChange({ ...value, textAlign: 'left' })} />
+            <AppearanceOption palette={previewPalette} label="两端对齐" active={value.textAlign === 'justify'} onPress={() => onChange({ ...value, textAlign: 'justify' })} />
+          </View>
+          <View style={styles.spacingSliderRow}>
+            <SpacingSlider palette={previewPalette} label="行距" value={value.lineHeight} minimum={1} maximum={3} step={0.1} format={(next) => next.toFixed(1)} onPreview={(lineHeight) => previewPrefs({ ...value, lineHeight })} onChange={(lineHeight) => onChange({ ...value, lineHeight })} />
+            <SpacingSlider palette={previewPalette} label="段间距" value={value.paragraphSpacing} minimum={0} maximum={64} step={2} format={(next) => String(Math.round(next))} onPreview={(paragraphSpacing) => previewPrefs({ ...value, paragraphSpacing })} onChange={(paragraphSpacing) => onChange({ ...value, paragraphSpacing })} />
+          </View>
+
+          <Text style={[styles.appearanceSectionLabel, { color: previewPalette.muted }]}>页面</Text>
+          <View style={styles.marginGrid}>
+            <MarginSlider palette={previewPalette} label="下边距" value={bottomPadding} onPreview={(padding) => previewPrefs({ ...value, pagePaddingTop: 0, pagePaddingBottom: padding })} onChange={(padding) => onChange({ ...value, pagePaddingTop: 0, pagePaddingBottom: padding })} />
+            <MarginSlider palette={previewPalette} label="左右边距" value={horizontalPadding} onPreview={(padding) => previewPrefs({ ...value, pagePadding: padding, pagePaddingLeft: padding, pagePaddingRight: padding })} onChange={(padding) => onChange({ ...value, pagePadding: padding, pagePaddingLeft: padding, pagePaddingRight: padding })} />
+          </View>
+          <Text style={[styles.appearanceSectionLabel, { color: previewPalette.muted }]}>纸张</Text>
+          <View style={styles.themeRow}>{themes.map((theme) => <Pressable key={theme.key} onPress={() => onChange({ ...value, theme: theme.key })} style={({ pressed }) => [styles.themeChoice, { backgroundColor: theme.color, borderColor: value.theme === theme.key ? previewPalette.accent : previewPalette.line, borderWidth: value.theme === theme.key ? 2 : 1 }, pressed && styles.pressed]}><Text style={[styles.themeName, { color: theme.textColor }]}>{theme.name}</Text></Pressable>)}</View>
         </ScrollView>
       </DraggableSheet>
     </Modal>
@@ -338,14 +389,14 @@ function AppearanceOption({ palette, label, active, onPress }: { palette: Reader
   return <Pressable onPress={onPress} style={({ pressed }) => [styles.appearanceOption, { borderColor: active ? palette.accent : palette.line, backgroundColor: active ? palette.focus : palette.control }, pressed && styles.pressed]}><Text style={[styles.appearanceOptionText, { color: active ? palette.accent : palette.muted }, active && styles.appearanceOptionTextActive]}>{label}</Text></Pressable>;
 }
 
-function SpacingSlider(props: { palette: ReaderPalette; label: string; value: number; minimum: number; maximum: number; step: number; format: (value: number) => string; onChange: (value: number) => void }) {
+function SpacingSlider(props: { palette: ReaderPalette; label: string; value: number; minimum: number; maximum: number; step: number; format: (value: number) => string; onPreview?: (value: number) => void; onChange: (value: number) => void }) {
   const [draft, setDraft] = useState(props.value);
   useEffect(() => setDraft(props.value), [props.value]);
-  return <View style={[styles.spacingSliderCard, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}><View style={styles.spacingSliderHead}><Text style={[styles.spacingSliderLabel, { color: props.palette.text }]}>{props.label}</Text><Text style={[styles.spacingSliderValue, { color: props.palette.accent }]}>{props.format(draft)}</Text></View><Slider accessibilityLabel={props.label} style={styles.spacingSlider} minimumValue={props.minimum} maximumValue={props.maximum} step={props.step} value={draft} onValueChange={setDraft} onSlidingComplete={props.onChange} minimumTrackTintColor={props.palette.accent} maximumTrackTintColor={props.palette.line} thumbTintColor={props.palette.accent} /></View>;
+  return <View style={[styles.sliderCardBase, styles.spacingSliderCard, { backgroundColor: props.palette.control, borderColor: props.palette.line }]}><View style={styles.spacingSliderHead}><Text style={[styles.spacingSliderLabel, { color: props.palette.text }]}>{props.label}</Text><Text style={[styles.spacingSliderValue, { color: props.palette.accent }]}>{props.format(draft)}</Text></View><Slider accessibilityLabel={props.label} style={styles.spacingSlider} minimumValue={props.minimum} maximumValue={props.maximum} step={props.step} value={draft} onValueChange={(next) => { setDraft(next); props.onPreview?.(next); }} onSlidingComplete={props.onChange} minimumTrackTintColor={props.palette.accent} maximumTrackTintColor={props.palette.line} thumbTintColor={props.palette.accent} /></View>;
 }
 
-function MarginSlider({ palette, icon, label, value, onChange }: { palette: ReaderPalette; icon: React.ComponentProps<typeof Ionicons>['name']; label: string; value: number; onChange: (value: number) => void }) {
+function MarginSlider({ palette, label, value, onPreview, onChange }: { palette: ReaderPalette; label: string; value: number; onPreview?: (value: number) => void; onChange: (value: number) => void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
-  return <View style={[styles.marginSliderCard, { backgroundColor: palette.control, borderColor: palette.line }]}><View style={styles.marginSliderHead}><View style={[styles.marginDirectionIcon, { backgroundColor: palette.focus }]}><Ionicons name={icon} size={13} color={palette.accent} /></View><Text style={[styles.marginDirection, { color: palette.text }]}>{label}</Text><Text style={[styles.marginValue, { color: palette.accent }]}>{Math.round(draft)}</Text></View><Slider accessibilityLabel={`${label}距`} style={styles.marginSlider} minimumValue={0} maximumValue={96} step={2} value={draft} onValueChange={setDraft} onSlidingComplete={(next) => onChange(Math.round(next))} minimumTrackTintColor={palette.accent} maximumTrackTintColor={palette.line} thumbTintColor={palette.accent} /></View>;
+  return <View style={[styles.sliderCardBase, styles.marginSliderCard, { backgroundColor: palette.control, borderColor: palette.line }]}><View style={styles.spacingSliderHead}><Text style={[styles.spacingSliderLabel, { color: palette.text }]}>{label}</Text><Text style={[styles.spacingSliderValue, { color: palette.accent }]}>{Math.round(draft)}</Text></View><Slider accessibilityLabel={label} style={styles.spacingSlider} minimumValue={0} maximumValue={96} step={2} value={draft} onValueChange={(next) => { setDraft(next); onPreview?.(Math.round(next)); }} onSlidingComplete={(next) => onChange(Math.round(next))} minimumTrackTintColor={palette.accent} maximumTrackTintColor={palette.line} thumbTintColor={palette.accent} /></View>;
 }

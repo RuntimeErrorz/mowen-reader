@@ -50,9 +50,6 @@ export function SearchModal(props: SearchModalProps) {
               <Text style={[styles.sheetEyebrow, { color: props.palette.accent }]}>FIND IN BOOK</Text>
               <Text style={[styles.sheetTitle, { color: props.palette.text }]}>全文查找</Text>
             </View>
-            <Pressable accessibilityLabel="关闭查找" onPress={close} style={[styles.closeButton, { backgroundColor: props.palette.surfaceAlt }]}>
-              <Ionicons name="close" size={20} color={props.palette.text} />
-            </Pressable>
           </View>
           <View style={[styles.searchInputRow, { backgroundColor: props.palette.control, borderColor: props.palette.accent }]}>
             <Ionicons name="search-outline" size={18} color={props.palette.accent} />
